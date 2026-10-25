@@ -357,3 +357,16 @@ pub(crate) async fn redo(
     canvas_channel.channel.publish(canvas);
     Ok(())
 }
+
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn set_page_chapter(
+    page: EntityId,
+    chapter: Option<String>,
+    project: State<'_, CurrentProject>,
+) -> std::result::Result<(), Error> {
+    let mut project = project.project.lock().await;
+    let project = project.as_mut().context("no project is open")?;
+    project.set_page_chapter(page, chapter).await?;
+    Ok(())
+}

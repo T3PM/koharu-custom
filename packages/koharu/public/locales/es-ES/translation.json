@@ -506,7 +506,8 @@
     "pan": "Desplazar",
     "remove": "Eliminar",
     "select": "Seleccionar",
-    "text": "Texto"
+    "text": "Texto",
+    "detect_text": "Detectar texto"
   },
   "updater": {
     "available": {
@@ -533,4 +534,4 @@
     "minimize": "Minimizar",
     "restore": "Restaurar"
   }
-}
+}

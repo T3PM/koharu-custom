@@ -385,11 +385,12 @@ pub(crate) async fn import(
         PageImportSource::Files => dialog.pick_files().await.map(|files| {
             files
                 .into_iter()
-                .map(|file| file.path().to_owned())
+                .map(|file| import::ImportEntry { path: file.path().to_owned(), chapter: None })
                 .collect::<Vec<_>>()
         }),
         PageImportSource::Folder => dialog.pick_folder().await.map(|folder| {
-            WalkDir::new(folder.path())
+            let root = folder.path();
+            WalkDir::new(root)
                 .follow_links(false)
                 .into_iter()
                 .filter_map(|entry| match entry {
@@ -405,6 +406,15 @@ pub(crate) async fn import(
                         .and_then(|extension| extension.to_str())
                         .is_some_and(|extension| extension.parse::<import::Format>().is_ok())
                 })
+                .map(|path| {
+                    let chapter = path
+                        .strip_prefix(root)
+                        .ok()
+                        .and_then(|rel| rel.parent())
+                        .filter(|parent| *parent != std::path::Path::new(""))
+                        .map(|parent| parent.to_string_lossy().into_owned());
+                    import::ImportEntry { path, chapter }
+                })
                 .collect::<Vec<_>>()
         }),
     };
@@ -414,7 +424,7 @@ pub(crate) async fn import(
     if files.is_empty() {
         return Err(anyhow::anyhow!("no supported images were found in the selection").into());
     }
-    let pages = tokio_rayon::spawn(move || import::import(files)).await?;
+    let pages = tokio_rayon::spawn(move || import::import_entries(files)).await?;
     let page_count = pages.len();
 
     let (commit, page) = {
@@ -423,14 +433,15 @@ pub(crate) async fn import(
         let source = AssetRole::new("source")?;
         let patch = project.snapshot().patch(|edit| {
             for imported in pages {
-                let page = edit.add_page(
-                    PageDraft::new(
-                        imported.name,
-                        f64::from(imported.width),
-                        f64::from(imported.height),
-                    ),
-                    At::End,
-                )?;
+                let mut draft = PageDraft::new(
+                    imported.name,
+                    f64::from(imported.width),
+                    f64::from(imported.height),
+                );
+                if let Some(chapter) = imported.chapter {
+                    draft = draft.with_chapter(chapter);
+                }
+                let page = edit.add_page(draft, At::End)?;
                 edit.set_asset(
                     page,
                     &source,
@@ -491,4 +502,120 @@ pub(crate) async fn select_page(
         project: project_info,
         page: selected_page,
     })
+}
+
+#[tracing::instrument(
+    target = "koharu_metrics",
+    name = "project_imported_from_folder",
+    skip_all,
+    fields(origin = "user")
+)]
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn import_folder_as_project(
+    folder_path: Option<String>,
+    window: WebviewWindow<CefRuntime>,
+    handle: AppHandle<CefRuntime>,
+) -> std::result::Result<(), Error> {
+    let folder_path = match folder_path {
+        Some(path) => std::path::PathBuf::from(path),
+        None => {
+            let dialog = rfd::AsyncFileDialog::new().set_parent(&window);
+            let Some(folder) = dialog.pick_folder().await else {
+                return Ok(());
+            };
+            folder.path().to_owned()
+        }
+    };
+    let project_name = folder_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("invalid folder name")?
+        .to_owned();
+
+    let library = handle.state::<ProjectLibrary>().inner().clone();
+    let opened = library.create(&project_name).await?;
+    replace_project(&handle, opened).await?;
+
+    let root = folder_path.as_path();
+    let mut items = WalkDir::new(root)
+        .follow_links(false)
+        .into_iter()
+        .filter_map(|entry| match entry {
+            Ok(entry) if entry.file_type().is_file() => Some(entry.into_path()),
+            Ok(_) => None,
+            Err(error) => {
+                tracing::warn!(%error, "could not inspect an import directory entry");
+                None
+            }
+        })
+        .filter(|path| {
+            path.extension()
+                .and_then(|extension| extension.to_str())
+                .is_some_and(|extension| extension.parse::<import::Format>().is_ok())
+        })
+        .map(|path| {
+            let chapter = path
+                .strip_prefix(root)
+                .ok()
+                .and_then(|rel| rel.parent())
+                .filter(|parent| *parent != std::path::Path::new(""))
+                .map(|parent| parent.to_string_lossy().into_owned());
+            import::ImportEntry { path, chapter }
+        })
+        .collect::<Vec<_>>();
+
+    if items.is_empty() {
+        return Ok(());
+    }
+
+    alphanumeric_sort::sort_slice_by_os_str_key(&mut items, |item| {
+        item.path.as_os_str()
+    });
+
+    let pages = tokio_rayon::spawn(move || import::import_entries(items)).await?;
+    let (commit, page) = {
+        let current = handle.state::<CurrentProject>();
+        let mut project = current.project.lock().await;
+        let project = project.as_mut().context("no project is open")?;
+        let source = AssetRole::new("source")?;
+        let patch = project.snapshot().patch(|edit| {
+            for imported in pages {
+                let mut draft = PageDraft::new(
+                    imported.name,
+                    f64::from(imported.width),
+                    f64::from(imported.height),
+                );
+                if let Some(chapter) = imported.chapter {
+                    draft = draft.with_chapter(chapter);
+                }
+                let page = edit.add_page(draft, At::End)?;
+                edit.set_asset(
+                    page,
+                    &source,
+                    AssetInput::new(
+                        imported.bytes,
+                        imported.format.to_mime_type(),
+                        AssetMetadata {
+                            width: Some(imported.width),
+                            height: Some(imported.height),
+                            attributes: Default::default(),
+                        },
+                    ),
+                )?;
+            }
+            Ok(())
+        })?;
+        let commit = project.session.commit(patch).await?;
+        project.record(vec![commit.revision]);
+        project.reconcile_page();
+        let page = project.active_page();
+        (commit, page)
+    };
+
+    let desktop = handle.state::<Desktop>();
+    desktop.synchronize(&commit.snapshot, page, &commit).await?;
+    let canvas = desktop.canvas_state();
+    handle.state::<CanvasChannel>().channel.publish(canvas);
+    Ok(())
 }

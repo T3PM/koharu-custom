@@ -40,12 +40,14 @@ impl Component for Project {
     }
 }
 
-#[revisioned(revision = 1)]
+#[revisioned(revision = 2)]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
 pub struct Page {
     pub label: String,
     pub width: f64,
     pub height: f64,
+    #[revision(start = 2)]
+    pub chapter: Option<String>,
 }
 
 impl Component for Page {
@@ -58,6 +60,7 @@ impl Component for Page {
             && self.height.is_finite()
             && self.width > 0.0
             && self.height > 0.0
+            && self.chapter.as_ref().map_or(true, |c| c.len() <= 4096 && !c.contains('\0'))
         {
             Ok(())
         } else {
@@ -71,6 +74,7 @@ pub struct PageDraft {
     pub label: String,
     pub width: f64,
     pub height: f64,
+    pub chapter: Option<String>,
 }
 
 impl PageDraft {
@@ -80,7 +84,14 @@ impl PageDraft {
             label: label.into(),
             width,
             height,
+            chapter: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_chapter(mut self, chapter: impl Into<String>) -> Self {
+        self.chapter = Some(chapter.into());
+        self
     }
 }
 
@@ -90,6 +101,7 @@ impl From<PageDraft> for Page {
             label: value.label,
             width: value.width,
             height: value.height,
+            chapter: value.chapter,
         }
     }
 }

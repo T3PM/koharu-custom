@@ -8,6 +8,7 @@ import {
   MousePointer2,
   Pipette,
   Plus,
+  ScanText,
   Sparkles,
   Type,
 } from 'lucide-react'
@@ -42,6 +43,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from '@koharu/ui/components/t
 const tools = [
   ['select', MousePointer2],
   ['text', Type],
+  ['detect_text', ScanText],
   ['draw', Brush],
   ['eraser', Eraser],
   ['color_picker', Pipette],
@@ -178,6 +180,4 @@ function BrushSize({ value, onChange }: { value: number; onChange: (value: numbe
   )
 }
 
-function clamp(value: number, min: number, max: number): number {
-  return Math.min(max, Math.max(min, Number.isFinite(value) ? value : min))
-}
+

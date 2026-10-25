@@ -151,6 +151,9 @@ const preferences: Preferences = {
     },
     inpainting: { model: 'lama' },
     processor: {},
+    ocr_options: {},
+    export_options: {},
+    hardware_options: {},
   },
   providers: {
     entries: [
@@ -1330,7 +1333,7 @@ describe('greenfield editor', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Pipeline' }))
     expect(screen.getByRole('heading', { level: 2, name: 'Pipeline' })).toBeInTheDocument()
-    expect(screen.getAllByRole('combobox')).toHaveLength(3)
+    expect(screen.getAllByRole('combobox')).toHaveLength(4)
     fireEvent.change(screen.getByRole('spinbutton', { name: 'Text threshold' }), {
       target: { value: '0.42' },
     })

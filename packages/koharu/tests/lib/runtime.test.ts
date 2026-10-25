@@ -42,6 +42,9 @@ const preferences: Preferences = {
     },
     inpainting: { model: 'lama' },
     processor: {},
+    ocr_options: {},
+    export_options: {},
+    hardware_options: {},
   },
   providers: {
     entries: [],

@@ -97,6 +97,187 @@ export function PipelinePreferences({
           )
         })}
       </PreferenceSection>
+
+      <PreferenceSection title={t('settings.pipeline.ocrTitle', 'OCR Options')}>
+        <PreferenceRow
+          title={t('settings.pipeline.textDirection', 'Text Direction')}
+          description={t(
+            'settings.pipeline.textDirectionDescription',
+            'Preferred text orientation for OCR reading',
+          )}
+        >
+          <Select
+            value={value.ocr_options?.direction ?? 'auto'}
+            items={{
+              auto: 'Auto',
+              vertical: 'Vertical',
+              horizontal: 'Horizontal',
+            }}
+            onValueChange={(dir) => {
+              if (dir) {
+                onChange({
+                  ...value,
+                  ocr_options: {
+                    ...(value.ocr_options ?? {
+                      target_language: null,
+                      direction: 'auto',
+                      crop_margin: 6,
+                    }),
+                    direction: dir as any,
+                  },
+                })
+              }
+            }}
+          >
+            <SelectTrigger className='h-8 min-w-[140px] text-[11px]'>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value='auto'>Auto</SelectItem>
+              <SelectItem value='vertical'>Vertical</SelectItem>
+              <SelectItem value='horizontal'>Horizontal</SelectItem>
+            </SelectContent>
+          </Select>
+        </PreferenceRow>
+
+        <PreferenceRow
+          title={t('settings.pipeline.cropMargin', 'Crop Margin')}
+          description={t(
+            'settings.pipeline.cropMarginDescription',
+            'Padding pixels around detected text boxes',
+          )}
+        >
+          <NumberField
+            label=''
+            value={value.ocr_options?.crop_margin ?? 6}
+            min={0}
+            max={64}
+            step={1}
+            onChange={(crop_margin) => {
+              onChange({
+                ...value,
+                ocr_options: {
+                  ...(value.ocr_options ?? {
+                    target_language: null,
+                    direction: 'auto',
+                    crop_margin: 6,
+                  }),
+                  crop_margin: crop_margin ?? 6,
+                },
+              })
+            }}
+          />
+        </PreferenceRow>
+      </PreferenceSection>
+
+      <PreferenceSection title={t('settings.pipeline.exportTitle', 'Export Options')}>
+        <PreferenceRow
+          title={t('settings.pipeline.exportQuality', 'Image Quality')}
+          description={t(
+            'settings.pipeline.exportQualityDescription',
+            'Compression quality for exported JPEG / WebP / AVIF (1-100)',
+          )}
+        >
+          <NumberField
+            label=''
+            value={value.export_options?.quality ?? 90}
+            min={1}
+            max={100}
+            step={1}
+            onChange={(quality) => {
+              onChange({
+                ...value,
+                export_options: {
+                  ...(value.export_options ?? {
+                    format: 'png',
+                    quality: 90,
+                    template: '{project}/{chapter}/{page}',
+                  }),
+                  quality: quality ?? 90,
+                },
+              })
+            }}
+          />
+        </PreferenceRow>
+
+        <PreferenceRow
+          title={t('settings.pipeline.exportTemplate', 'Export Path Template')}
+          description={t(
+            'settings.pipeline.exportTemplateDescription',
+            'Naming pattern for exported files',
+          )}
+        >
+          <TextField
+            label=''
+            value={value.export_options?.template ?? '{project}/{chapter}/{page}'}
+            onChange={(template) => {
+              onChange({
+                ...value,
+                export_options: {
+                  ...(value.export_options ?? {
+                    format: 'png',
+                    quality: 90,
+                    template: '{project}/{chapter}/{page}',
+                  }),
+                  template: template || '{project}/{chapter}/{page}',
+                },
+              })
+            }}
+          />
+        </PreferenceRow>
+      </PreferenceSection>
+
+      <PreferenceSection title={t('settings.pipeline.hardwareTitle', 'Hardware & Performance')}>
+        <PreferenceRow
+          title={t('settings.pipeline.workerThreads', 'Worker Threads')}
+          description={t(
+            'settings.pipeline.workerThreadsDescription',
+            'Parallel background worker threads (0 for auto)',
+          )}
+        >
+          <NumberField
+            label=''
+            value={value.hardware_options?.threads ?? 4}
+            min={1}
+            max={32}
+            step={1}
+            onChange={(worker_threads) => {
+              onChange({
+                ...value,
+                hardware_options: {
+                  ...(value.hardware_options ?? { vram_budget_gb: null, threads: 4 }),
+                  threads: worker_threads ?? 4,
+                },
+              })
+            }}
+          />
+        </PreferenceRow>
+
+        <PreferenceRow
+          title={t('settings.pipeline.vramBudget', 'VRAM Budget (MB)')}
+          description={t(
+            'settings.pipeline.vramBudgetDescription',
+            'Maximum VRAM allocation in MB for model inference (empty for auto)',
+          )}
+        >
+          <NumberField
+            label=''
+            value={value.hardware_options?.vram_budget_gb ?? null}
+            min={512}
+            max={65536}
+            step={512}
+            onChange={(vram_budget_mb) => {
+              onChange({
+                ...value,
+                hardware_options: {
+                  ...(value.hardware_options ?? { vram_budget_gb: null, threads: 4 }),
+                  vram_budget_gb: vram_budget_mb,
+                },
+              })
+            }}
+          />
+        </PreferenceRow>
+      </PreferenceSection>
     </PreferencePage>
   )
 }

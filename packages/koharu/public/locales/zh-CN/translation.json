@@ -506,7 +506,8 @@
     "pan": "平移",
     "remove": "移除",
     "select": "选择",
-    "text": "文本"
+    "text": "文本",
+    "detect_text": "检测文本"
   },
   "updater": {
     "available": {
@@ -533,4 +534,4 @@
     "minimize": "最小化",
     "restore": "还原"
   }
-}
+}

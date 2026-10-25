@@ -38,15 +38,22 @@ pub(super) struct EncodedPage {
     pub(super) bytes: Vec<u8>,
 }
 
+#[derive(Clone, Debug)]
+pub(super) struct ImportEntry {
+    pub(super) path: PathBuf,
+    pub(super) chapter: Option<String>,
+}
+
 pub(super) struct Page {
     pub(super) name: String,
     pub(super) bytes: Arc<[u8]>,
     pub(super) format: ImageFormat,
     pub(super) width: u32,
     pub(super) height: u32,
+    pub(super) chapter: Option<String>,
 }
 
-fn decode(path: &Path, source: EncodedPage) -> Result<Page> {
+fn decode(path: &Path, source: EncodedPage, chapter: Option<String>) -> Result<Page> {
     let EncodedPage { name, bytes } = source;
     let format = image::guess_format(&bytes).with_context(|| {
         format!(
@@ -68,10 +75,54 @@ fn decode(path: &Path, source: EncodedPage) -> Result<Page> {
         format,
         width,
         height,
+        chapter,
     })
 }
 
-pub(super) fn import(mut paths: Vec<PathBuf>) -> Result<Vec<Page>> {
+
+
+pub(super) fn import_entries(mut items: Vec<ImportEntry>) -> Result<Vec<Page>> {
+    alphanumeric_sort::sort_slice_by_os_str_key(&mut items, |item| {
+        item.path.file_name().unwrap_or_else(|| item.path.as_os_str())
+    });
+    let mut groups = items
+        .into_par_iter()
+        .map(|item| -> Result<Vec<Page>> {
+            let extension = item
+                .path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .and_then(|extension| extension.parse::<Format>().ok());
+            let encoded = match extension {
+                Some(Format::Raster) => vec![EncodedPage {
+                    name: item
+                        .path
+                        .file_name()
+                        .map(|name| name.to_string_lossy().into_owned())
+                        .unwrap_or_else(|| "page".to_owned()),
+                    bytes: fs::read(&item.path)
+                        .with_context(|| format!("failed to read {}", item.path.display()))?,
+                }],
+                Some(Format::Zip) => zip::extract(&item.path)?,
+                Some(Format::Rar) => rar::extract(&item.path)?,
+                Some(Format::Pdf) => pdf::render(&item.path)?,
+                None => bail!("unsupported page import path {}", item.path.display()),
+            };
+            encoded
+                .into_iter()
+                .map(|source| decode(&item.path, source, item.chapter.clone()))
+                .collect()
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let page_count = groups.iter().map(Vec::len).sum();
+    let mut pages = Vec::with_capacity(page_count);
+    for group in &mut groups {
+        pages.append(group);
+    }
+    Ok(pages)
+}
+
+fn _unused_import_old(mut paths: Vec<PathBuf>) -> Result<Vec<Page>> {
     alphanumeric_sort::sort_slice_by_os_str_key(&mut paths, |path| {
         path.file_name().unwrap_or_else(|| path.as_os_str())
     });
@@ -98,7 +149,7 @@ pub(super) fn import(mut paths: Vec<PathBuf>) -> Result<Vec<Page>> {
             };
             encoded
                 .into_iter()
-                .map(|source| decode(&path, source))
+                .map(|source| decode(&path, source, None))
                 .collect()
         })
         .collect::<Result<Vec<_>>>()?;

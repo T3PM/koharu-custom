@@ -54,6 +54,7 @@ pub struct PageSummary {
     pub source_asset: Option<String>,
     #[specta(type = f64)]
     pub layer_count: usize,
+    pub chapter: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Type)]
@@ -346,16 +347,39 @@ impl Project {
                     },
                     source_asset,
                     layer_count,
+                    chapter: value.chapter,
                 })
             })
             .collect()
     }
 
-    pub(crate) async fn rename_page(&mut self, page: EntityId, label: String) -> Result<Commit> {
+    
+    pub(crate) async fn set_page_chapter(
+        &mut self,
+        page: EntityId,
+        chapter: Option<String>,
+    ) -> Result<Commit> {
+        let snapshot = self.snapshot();
+        let value = snapshot.page(page)?.page()?;
+        let patch = snapshot.patch(|edit| {
+            let mut draft = PageDraft::new(value.label, value.width, value.height);
+            if let Some(chapter) = chapter {
+                draft = draft.with_chapter(chapter);
+            }
+            edit.set_page(page, draft)
+        })?;
+        self.commit(patch).await
+    }
+
+pub(crate) async fn rename_page(&mut self, page: EntityId, label: String) -> Result<Commit> {
         let snapshot = self.snapshot();
         let current = snapshot.page(page)?.page()?;
         let patch = snapshot.patch(|edit| {
-            edit.set_page(page, PageDraft::new(label, current.width, current.height))
+            let mut draft = PageDraft::new(label, current.width, current.height);
+            if let Some(chapter) = current.chapter {
+                draft = draft.with_chapter(chapter);
+            }
+            edit.set_page(page, draft)
         })?;
         self.commit(patch).await
     }

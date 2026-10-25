@@ -143,14 +143,27 @@ pub(crate) async fn export(
                 index + 1,
                 if name.is_empty() { "page" } else { &name }
             );
+            let target_dir = if let Some(ref ch) = page.chapter {
+                let safe_ch = ch.replace(['<', '>', ':', '"', '/', '\\', '|', '?', '*'], "_");
+                let dir = destination.join(safe_ch);
+                let _ = std::fs::create_dir_all(&dir);
+                dir
+            } else {
+                destination.clone()
+            };
             if let Some(archive) = &mut archive {
-                // PNG data is already compressed.
+                let archive_entry = if let Some(ref ch) = page.chapter {
+                    let safe_ch = ch.replace(['<', '>', ':', '"', '/', '\\', '|', '?', '*'], "_");
+                    format!("{safe_ch}/{name}")
+                } else {
+                    name
+                };
                 let options = zip::write::SimpleFileOptions::default()
                     .compression_method(zip::CompressionMethod::Stored);
-                archive.start_file(name, options)?;
+                archive.start_file(archive_entry, options)?;
                 archive.write_all(&bytes)?;
             } else {
-                std::fs::write(destination.join(name), bytes)?;
+                std::fs::write(target_dir.join(name), bytes)?;
             }
             tracing::info!(
                 target: "koharu_metrics",
@@ -229,4 +242,137 @@ async fn rasterize(
     tokio_rayon::spawn(move || rasterizer.rasterize(&frame, options))
         .await
         .map_err(Into::into)
+}
+
+#[tracing::instrument(
+    target = "koharu_metrics",
+    name = "chapter_exported",
+    skip_all,
+    fields(origin = "user", chapter = %chapter, format = ?format)
+)]
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn export_chapter(
+    chapter: String,
+    format: ExportFormat,
+    window: WebviewWindow<CefRuntime>,
+    project: State<'_, CurrentProject>,
+    desktop: State<'_, Desktop>,
+) -> std::result::Result<(), Error> {
+    let (name, snapshot) = {
+        let project = project.project.lock().await;
+        let project = project.as_ref().context("no project is open")?;
+        (project.name.clone(), project.snapshot())
+    };
+    let pages = snapshot
+        .pages()
+        .filter_map(|page| {
+            let val = page.page().ok()?;
+            if val.chapter.as_deref() == Some(&chapter) {
+                Some(page.id())
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    if pages.is_empty() {
+        return Err(anyhow::anyhow!("there are no pages in chapter {chapter}").into());
+    }
+    let dialog = rfd::AsyncFileDialog::new().set_parent(&window);
+    let destination = match format {
+        ExportFormat::Png | ExportFormat::Psd => dialog.pick_folder().await,
+        ExportFormat::Cbz => {
+            dialog
+                .add_filter("Comic Book Archive", &["cbz"])
+                .set_file_name(format!("{name} - {chapter}.cbz"))
+                .save_file()
+                .await
+        }
+    };
+    let Some(destination) = destination.map(|destination| destination.path().to_owned()) else {
+        return Ok(());
+    };
+    let renderer = desktop.renderer();
+    let rasterizer = desktop.rasterizer().await?;
+    let frames = try_join_all(pages.iter().map(|&page| renderer.render(&snapshot, page))).await?;
+    let (extension, images) = match format {
+        ExportFormat::Png | ExportFormat::Cbz => {
+            let images = tokio_rayon::spawn(move || {
+                frames
+                    .par_iter()
+                    .map(|frame| -> Result<_> {
+                        let image = rasterizer
+                            .rasterize(&frame.raster_frame()?, RasterOptions::default())?
+                            .image;
+                        let mut bytes = Vec::new();
+                        PngEncoder::new_with_quality(
+                            &mut bytes,
+                            CompressionType::Best,
+                            FilterType::Adaptive,
+                        )
+                        .write_image(
+                            image.as_raw(),
+                            image.width(),
+                            image.height(),
+                            ExtendedColorType::Rgba8,
+                        )?;
+                        Ok(bytes)
+                    })
+                    .collect::<Result<Vec<_>>>()
+            })
+            .await?;
+            ("png", images)
+        }
+        ExportFormat::Psd => {
+            let options = PsdExportOptions::default();
+            let images = try_join_all(
+                frames
+                    .iter()
+                    .map(|frame| export_page(Arc::clone(&rasterizer), &snapshot, frame, &options)),
+            )
+            .await?;
+            ("psd", images)
+        }
+    };
+    tokio_rayon::spawn(move || -> Result<()> {
+        let mut archive = if matches!(format, ExportFormat::Cbz) {
+            let directory = destination.parent().context("archive path has no parent")?;
+            Some(zip::ZipWriter::new(tempfile::NamedTempFile::new_in(
+                directory,
+            )?))
+        } else {
+            None
+        };
+        let width = pages.len().to_string().len().max(4);
+        for (index, (page_id, bytes)) in pages.into_iter().zip(images).enumerate() {
+            let page = snapshot.page(page_id)?.page()?;
+            let name = page
+                .label
+                .trim()
+                .trim_end_matches(|character: char| character == '.' || character.is_whitespace());
+            let name = name
+                .rsplit_once('.')
+                .map_or(name, |(stem, _)| stem)
+                .replace(['<', '>', ':', '"', '/', '\\', '|', '?', '*'], "_");
+            let name = format!(
+                "{:0width$}_{}.{extension}",
+                index + 1,
+                if name.is_empty() { "page" } else { &name }
+            );
+            if let Some(archive) = &mut archive {
+                let options = zip::write::SimpleFileOptions::default()
+                    .compression_method(zip::CompressionMethod::Stored);
+                archive.start_file(name, options)?;
+                archive.write_all(&bytes)?;
+            } else {
+                std::fs::write(destination.join(name), bytes)?;
+            }
+        }
+        if let Some(archive) = archive {
+            archive.finish()?.persist(destination)?;
+        }
+        Ok(())
+    })
+    .await?;
+    Ok(())
 }

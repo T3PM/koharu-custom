@@ -506,7 +506,8 @@
     "pan": "이동",
     "remove": "제거",
     "select": "선택",
-    "text": "텍스트"
+    "text": "텍스트",
+    "detect_text": "텍스트 감지"
   },
   "updater": {
     "available": {
@@ -533,4 +534,4 @@
     "minimize": "최소화",
     "restore": "복원"
   }
-}
+}

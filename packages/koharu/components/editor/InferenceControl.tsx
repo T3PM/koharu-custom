@@ -221,7 +221,11 @@ function RuntimeSelector({
             />
             <SelectorRow
               label={t('inference.scope')}
-              value={t(`inference.scopeShort.${scope}`)}
+              value={
+                scope === 'chapter'
+                  ? t('inference.chapter', 'Chapter')
+                  : t(`inference.scopeShort.${scope}`)
+              }
               onClick={() => setView('scope')}
             />
             <SelectorRow
@@ -274,6 +278,16 @@ function RuntimeSelector({
               label={t('inference.currentPage')}
               detail={t('inference.currentPageDescription')}
               selected={scope === 'page'}
+              onSelect={chooseScope}
+            />
+            <SelectorOption
+              value='chapter'
+              label={t('inference.currentChapter', 'Current Chapter')}
+              detail={t(
+                'inference.currentChapterDescription',
+                'Process all pages in the current chapter',
+              )}
+              selected={scope === 'chapter'}
               onSelect={chooseScope}
             />
             <SelectorOption

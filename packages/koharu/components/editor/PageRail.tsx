@@ -82,6 +82,8 @@ export function PageRail() {
   const [query, setQuery] = useState('')
   const [renaming, setRenaming] = useState<PageSummary | null>(null)
   const [renameValue, setRenameValue] = useState('')
+  const [chapterModalPage, setChapterModalPage] = useState<PageSummary | null>(null)
+  const [chapterInput, setChapterInput] = useState('')
   const normalized = query.trim().toLocaleLowerCase()
   const visiblePages = useMemo(
     () =>
@@ -193,6 +195,22 @@ export function PageRail() {
       })
       .catch(() => {
         if (intentPrefetch.current === state) state.pages.delete(page)
+      })
+  }
+
+  const submitSetChapter = () => {
+    const page = chapterModalPage
+    if (!page) {
+      setChapterModalPage(null)
+      return
+    }
+    const ch = chapterInput.trim() || null
+    void call(commands.setPageChapter, page.id, ch)
+      .then(() => refresh(projectKey, pagesKey, pageKey))
+      .catch(() => undefined)
+      .finally(() => {
+        setChapterModalPage(null)
+        setChapterInput('')
       })
   }
 
@@ -308,6 +326,10 @@ export function PageRail() {
                       onDragStart={() => setDragged(page.id)}
                       onDragEnd={() => setDragged(null)}
                       onRename={() => openRename(page)}
+                      onSetChapter={() => {
+                        setChapterModalPage(page)
+                        setChapterInput((page as any).chapter ?? '')
+                      }}
                       onDelete={() => deletePage(page.id)}
                       onDrop={() => {
                         if (dragged && dragged !== page.id) {
@@ -382,6 +404,56 @@ export function PageRail() {
           </form>
         </DialogContent>
       </Dialog>
+
+      <Dialog
+        open={chapterModalPage !== null}
+        onOpenChange={(open) => {
+          if (!open) {
+            setChapterModalPage(null)
+            setChapterInput('')
+          }
+        }}
+      >
+        <DialogContent className='sm:max-w-md'>
+          <form
+            onSubmit={(event) => {
+              event.preventDefault()
+              submitSetChapter()
+            }}
+          >
+            <DialogHeader>
+              <DialogTitle>{t('navigator.setChapterTitle', 'Set Page Chapter')}</DialogTitle>
+              <DialogDescription>
+                {t(
+                  'navigator.setChapterDescription',
+                  'Organize this page into a chapter folder (leave empty for none).',
+                )}
+              </DialogDescription>
+            </DialogHeader>
+            <Input
+              autoFocus
+              value={chapterInput}
+              placeholder={t('navigator.chapterNamePlaceholder', 'Chapter name (e.g. Chapter 01)')}
+              aria-label={t('navigator.chapterName', 'Chapter')}
+              className='mt-4'
+              onChange={(event) => setChapterInput(event.currentTarget.value)}
+            />
+            <DialogFooter className='mt-4'>
+              <Button
+                type='button'
+                variant='ghost'
+                onClick={() => {
+                  setChapterModalPage(null)
+                  setChapterInput('')
+                }}
+              >
+                {t('common.cancel')}
+              </Button>
+              <Button type='submit'>{t('common.save', 'Save')}</Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
     </>
   )
 }
@@ -451,6 +523,7 @@ function PageItem({
   onDragStart,
   onDragEnd,
   onRename,
+  onSetChapter,
   onDelete,
   onDrop,
 }: {
@@ -463,6 +536,7 @@ function PageItem({
   onDragStart: () => void
   onDragEnd: () => void
   onRename: () => void
+  onSetChapter: () => void
   onDelete: () => void
   onDrop: () => void
 }) {
@@ -522,6 +596,9 @@ function PageItem({
             </DropdownMenuTrigger>
             <DropdownMenuContent align='end'>
               <DropdownMenuItem onClick={onRename}>{t('navigator.rename')}</DropdownMenuItem>
+              <DropdownMenuItem onClick={onSetChapter}>
+                {t('navigator.setChapter', 'Set Chapter...')}
+              </DropdownMenuItem>
               <DropdownMenuSeparator />
               <DropdownMenuItem variant='destructive' onClick={onDelete}>
                 <Trash2 /> {t('navigator.delete')}
@@ -529,9 +606,16 @@ function PageItem({
             </DropdownMenuContent>
           </DropdownMenu>
         </div>
-        <p className='mt-1 text-[9px] leading-3.5 text-muted-foreground'>
-          {t('navigator.layerCount', { count: page.layer_count })}
-        </p>
+        <div className='mt-1 flex items-center gap-1.5'>
+          {(page as any).chapter && (
+            <span className='py-0.2 inline-flex items-center rounded bg-primary/10 px-1 text-[8px] font-medium text-primary'>
+              {(page as any).chapter}
+            </span>
+          )}
+          <p className='text-[9px] leading-3.5 text-muted-foreground'>
+            {t('navigator.layerCount', { count: page.layer_count })}
+          </p>
+        </div>
         <p className='mt-1 text-[9px] text-muted-foreground tabular-nums'>
           {page.size.width} × {page.size.height}
         </p>

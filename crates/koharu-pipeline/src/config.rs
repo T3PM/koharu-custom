@@ -5,6 +5,31 @@ use specta::Type;
 
 use crate::stages::{Flux2KleinConfig, KoharuLayoutRFDetrSeg2XLConfig, RoremMixedConfig};
 
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, Type)]
+#[serde(default)]
+pub struct OcrOptions {
+    pub language: Option<String>,
+    pub max_dimension: Option<u32>,
+    pub direction: Option<String>,
+    pub crop_margin: Option<u32>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, Type)]
+#[serde(default)]
+pub struct ExportOptions {
+    pub format: Option<String>,
+    pub quality: Option<u8>,
+    pub template: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, Type)]
+#[serde(default)]
+pub struct HardwareOptions {
+    pub device: Option<String>,
+    pub threads: Option<u32>,
+    pub vram_budget_gb: Option<f32>,
+}
+
 #[derive(Clone, Debug, PartialEq, Type)]
 pub struct PipelineConfig {
     pub detection: DetectionModel,
@@ -14,6 +39,9 @@ pub struct PipelineConfig {
     /// Settings for every model are kept independently of the active model.
     /// The active stage fields above only select which profile is used.
     pub processor: ProcessorConfig,
+    pub ocr_options: OcrOptions,
+    pub export_options: ExportOptions,
+    pub hardware_options: HardwareOptions,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -25,6 +53,12 @@ struct PipelineFile {
     inpainting: ModelSelection,
     #[serde(default)]
     processor: ProcessorConfig,
+    #[serde(default)]
+    ocr_options: OcrOptions,
+    #[serde(default)]
+    export_options: ExportOptions,
+    #[serde(default)]
+    hardware_options: HardwareOptions,
 }
 
 impl Default for PipelineFile {
@@ -41,6 +75,9 @@ impl Default for PipelineFile {
                 model: "lama".to_owned(),
             },
             processor: ProcessorConfig::default(),
+            ocr_options: OcrOptions::default(),
+            export_options: ExportOptions::default(),
+            hardware_options: HardwareOptions::default(),
         }
     }
 }
@@ -97,6 +134,9 @@ impl Serialize for PipelineConfig {
                 model: inpainting.to_owned(),
             },
             processor,
+            ocr_options: self.ocr_options.clone(),
+            export_options: self.export_options.clone(),
+            hardware_options: self.hardware_options.clone(),
         }
         .serialize(serializer)
     }
@@ -153,6 +193,9 @@ impl<'de> Deserialize<'de> for PipelineConfig {
             translation: file.translation,
             inpainting,
             processor: file.processor,
+            ocr_options: file.ocr_options,
+            export_options: file.export_options,
+            hardware_options: file.hardware_options,
         })
     }
 }
@@ -167,6 +210,9 @@ impl Default for PipelineConfig {
             translation: TranslationConfig::default(),
             inpainting: InpaintingModel::LaMa {},
             processor: ProcessorConfig::default(),
+            ocr_options: OcrOptions::default(),
+            export_options: ExportOptions::default(),
+            hardware_options: HardwareOptions::default(),
         }
     }
 }

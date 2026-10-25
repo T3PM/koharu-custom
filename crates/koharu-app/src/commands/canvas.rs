@@ -484,3 +484,70 @@ fn encode_mask(
         },
     ))
 }
+
+#[tracing::instrument(
+    target = "koharu_metrics",
+    name = "text_box_detected",
+    skip_all,
+    fields(origin = "user", entity_count = 1_u64)
+)]
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn detect_text_box(
+    frame: Frame,
+    desktop: State<'_, Desktop>,
+    project: State<'_, CurrentProject>,
+    canvas_channel: State<'_, CanvasChannel>,
+    processing: State<'_, Processing>,
+    job_channel: State<'_, JobChannel>,
+    handle: AppHandle<CefRuntime>,
+) -> std::result::Result<Option<LayerCommit>, Error> {
+    let page = {
+        let project = project.project.lock().await;
+        let project = project.as_ref().context("no project is open")?;
+        project.active_page().context("the project has no active page")?
+    };
+    let bounds = koharu_pipeline::Bounds {
+        x: frame.x as f64,
+        y: frame.y as f64,
+        width: frame.width as f64,
+        height: frame.height as f64,
+    };
+    let _ = processing::process(
+        handle.clone(),
+        koharu_pipeline::Scope::Region { page, bounds },
+        koharu_pipeline::Operation::Stages {
+            stages: vec![koharu_pipeline::Stage::Detection, koharu_pipeline::Stage::Ocr],
+        },
+        project.clone(),
+        processing,
+        job_channel,
+    )
+    .await;
+
+    let (commit, _active_page, layer) = {
+        let mut proj = project.project.lock().await;
+        let proj = proj.as_mut().context("no project is open")?;
+        let snapshot = proj.snapshot();
+        let matched = snapshot.descendants(page)?.find_map(|entity| {
+            if entity.component::<koharu_scene::TextLayout>().ok().flatten().is_some() {
+                Some(entity.id())
+            } else {
+                None
+            }
+        });
+        if let Some(layer) = matched {
+            (snapshot.revision(), proj.active_page(), layer)
+        } else {
+            let (commit, layer) = proj.add_text_box(page, frame).await?;
+            proj.record_commit(&commit);
+            (commit.revision, proj.active_page(), layer)
+        }
+    };
+    let canvas = desktop.canvas_state();
+    canvas_channel.channel.publish(canvas);
+    Ok(Some(LayerCommit {
+        revision: commit,
+        layer,
+    }))
+}

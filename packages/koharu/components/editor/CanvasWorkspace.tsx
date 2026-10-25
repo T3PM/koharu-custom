@@ -52,12 +52,14 @@ const canvasCursors = {
   color_picker: 'crosshair',
   remove: 'none',
   pan: 'grab',
+  detect_text: 'crosshair',
 } as const satisfies Record<CanvasTool, string | undefined>
 
 type Gesture =
   | { kind: 'pan'; pointer: number; start: Point; translation: [number, number] }
   | { kind: 'move'; pointer: number; start: Point; originals: TransformFrame[] }
   | { kind: 'text'; pointer: number; start: Point; frame: Frame }
+  | { kind: 'detect_text'; pointer: number; start: Point; frame: Frame }
   | StrokeGesture
 
 interface StrokeGesture {
@@ -453,7 +455,7 @@ export function CanvasWorkspace() {
           y: point.y - current.start.y,
         }),
       )
-    } else if (current.kind === 'text') {
+    } else if (current.kind === 'text' || current.kind === 'detect_text') {
       current.frame = draftFrame(current.start, point)
       setDraft(current.frame)
     } else if (current.kind === 'paint' || current.kind === 'erase' || current.kind === 'inpaint') {
@@ -482,6 +484,18 @@ export function CanvasWorkspace() {
           return refresh(projectKey, pagesKey, pageKey)
         })
         .catch(() => undefined)
+    } else if (current.kind === 'detect_text') {
+      setDraft(null)
+      if (current.frame.width > 2 && current.frame.height > 2) {
+        void call(commands.detectTextBox, current.frame)
+          .then((result) => {
+            if (result?.layer) {
+              selectLayers([result.layer])
+            }
+            return refresh(projectKey, pagesKey, pageKey)
+          })
+          .catch((err) => receiveError(errorMessage(err)))
+      }
     } else if (current.kind === 'paint' || current.kind === 'erase' || current.kind === 'inpaint') {
       strokeUpdates.commit()
       try {
@@ -493,30 +507,30 @@ export function CanvasWorkspace() {
       const operation =
         current.kind === 'paint'
           ? enqueue(() =>
-            call(commands.commitPaint, current.revision, current.layer, current.points, {
-              diameter: current.diameter,
-              color: current.color!,
-            }),
-          ).then((result) => {
-            selectLayers([result.layer])
-            return refresh(projectKey, pagesKey, pageKey)
-          })
-          : current.kind === 'erase'
-            ? enqueue(() =>
-              call(
-                commands.commitErase,
-                current.revision,
-                current.layer!,
-                current.points,
-                current.diameter,
-              ),
+              call(commands.commitPaint, current.revision, current.layer, current.points, {
+                diameter: current.diameter,
+                color: current.color!,
+              }),
             ).then((result) => {
               selectLayers([result.layer])
               return refresh(projectKey, pagesKey, pageKey)
             })
+          : current.kind === 'erase'
+            ? enqueue(() =>
+                call(
+                  commands.commitErase,
+                  current.revision,
+                  current.layer!,
+                  current.points,
+                  current.diameter,
+                ),
+              ).then((result) => {
+                selectLayers([result.layer])
+                return refresh(projectKey, pagesKey, pageKey)
+              })
             : enqueue(() =>
-              call(commands.commitInpaint, current.revision, current.points, current.diameter),
-            )
+                call(commands.commitInpaint, current.revision, current.points, current.diameter),
+              )
       commitPending.current = true
       void operation
         .catch(() => canvas?.cancelStroke())
@@ -587,6 +601,15 @@ export function CanvasWorkspace() {
             } else if (tool === 'text') {
               const frame = draftFrame(point, point)
               gesture.current = { kind: 'text', pointer: event.pointerId, start: point, frame }
+              setDraft(frame)
+            } else if (tool === 'detect_text') {
+              const frame = draftFrame(point, point)
+              gesture.current = {
+                kind: 'detect_text',
+                pointer: event.pointerId,
+                start: point,
+                frame,
+              }
               setDraft(frame)
             } else if (tool === 'draw') {
               strokeUpdates.clear()
@@ -907,7 +930,7 @@ class FrameCommand<Value> {
   constructor(
     private readonly execute: (value: Value) => void | Promise<unknown>,
     private readonly merge: (current: Value, next: Value) => Value = (_current, next) => next,
-  ) { }
+  ) {}
 
   schedule(value: Value): void {
     this.pending = this.pending === undefined ? value : this.merge(this.pending, value)

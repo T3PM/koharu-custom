@@ -1,6 +1,6 @@
 'use client'
 
-import { Folder, FolderPlus, Plus, Settings, Trash2 } from 'lucide-react'
+import { Folder, FolderDown, FolderPlus, Plus, Settings, Trash2 } from 'lucide-react'
 import { useCallback, useEffect, useState, type FormEvent } from 'react'
 import { useTranslation } from 'react-i18next'
 
@@ -44,6 +44,17 @@ export function StartView() {
   useEffect(() => {
     void reload().catch(() => undefined)
   }, [reload])
+
+  const importFolderAsProject = async () => {
+    if (busy) return
+    setBusy('import_folder')
+    try {
+      await call(commands.importFolderAsProject, null)
+      await refresh(projectKey, pagesKey, pageKey)
+    } finally {
+      setBusy(null)
+    }
+  }
 
   const createProject = async (event: FormEvent) => {
     event.preventDefault()
@@ -160,6 +171,28 @@ export function StartView() {
                     {t('start.create')}
                   </Button>
                 </form>
+
+                <div className='mt-3 flex flex-col gap-2'>
+                  <div className='relative flex items-center justify-center'>
+                    <div className='absolute inset-0 flex items-center'>
+                      <div className='w-full border-t border-border/60' />
+                    </div>
+                    <span className='relative bg-[var(--surface-titlebar)] px-2 text-[10px] text-muted-foreground uppercase'>
+                      {t('common.or', 'or')}
+                    </span>
+                  </div>
+                  <Button
+                    type='button'
+                    variant='outline'
+                    size='sm'
+                    className='h-9 justify-center gap-1.5 text-[11px]'
+                    disabled={busy !== null}
+                    onClick={importFolderAsProject}
+                  >
+                    <FolderDown className='size-3.5' />
+                    {t('start.importFolderProject', 'Import Folder as Project')}
+                  </Button>
+                </div>
 
                 <p className='mt-auto pt-8 text-[10px] leading-4 text-muted-foreground'>
                   {t('start.storageHint')}

@@ -342,6 +342,7 @@ function LoadingPreferences() {
 const shortcutKeys: Record<ShortcutAction, string> = {
   select: 'tools.select',
   text: 'tools.text',
+  detect_text: 'tools.detect_text',
   draw: 'tools.draw',
   eraser: 'tools.eraser',
   color_picker: 'tools.color_picker',

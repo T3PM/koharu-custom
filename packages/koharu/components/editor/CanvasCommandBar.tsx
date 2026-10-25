@@ -2,12 +2,13 @@
 
 import { InferenceControl } from '@/components/editor/InferenceControl'
 import { call } from '@/lib/backend'
-import { usePage } from '@/lib/queries'
+import { usePage, usePages } from '@/lib/queries'
 import { pipelineStages, useKoharuStore, type PipelineScope } from '@/lib/store'
 import { commands, type Scope, type Stage } from '@koharu/bridge/protocol'
 
 export function CanvasCommandBar() {
   const page = usePage().data
+  const pages = usePages().data
   const selectedPages = useKoharuStore((state) => state.selectedPages)
   const jobs = useKoharuStore((state) => state.jobs)
   const running = Object.values(jobs).find((job) => job.state === 'running')
@@ -19,7 +20,14 @@ export function CanvasCommandBar() {
         ? { scope: 'project' }
         : selection === 'selected-pages'
           ? { scope: 'pages', value: selectedPages }
-          : { scope: 'pages', value: [page.id] }
+          : selection === 'chapter'
+            ? {
+                scope: 'pages',
+                value: (pages ?? [])
+                  .filter((p) => ((p as any).chapter ?? null) === ((page as any).chapter ?? null))
+                  .map((p) => p.id),
+              }
+            : { scope: 'pages', value: [page.id] }
     const operation =
       stages.length === pipelineStages.length
         ? ({ operation: 'full' } as const)

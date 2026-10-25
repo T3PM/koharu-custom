@@ -128,6 +128,9 @@ impl Arguments {
                 }
             },
             processor: Default::default(),
+            ocr_options: Default::default(),
+            export_options: Default::default(),
+            hardware_options: Default::default(),
         }
     }
 }

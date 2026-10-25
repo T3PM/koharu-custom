@@ -110,7 +110,6 @@ async fn built_in_component_schema_revisions_are_explicit() {
     assert_eq!(
         [
             schema::<Project>(),
-            schema::<Page>(),
             schema::<RasterLayer>(),
             schema::<Geometry>(),
             schema::<Visibility>(),
@@ -128,8 +127,9 @@ async fn built_in_component_schema_revisions_are_explicit() {
             schema::<crate::components::Assets>(),
             schema::<Relation>(),
         ],
-        [1; 18]
+        [1; 17]
     );
+    assert_eq!(schema::<Page>(), 2);
     assert_eq!(schema::<TextLayout>(), 2);
 }
 

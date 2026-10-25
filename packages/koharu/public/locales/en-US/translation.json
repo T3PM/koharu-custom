@@ -500,6 +500,7 @@
     "brushSizeShort": "{{size}} px",
     "color_picker": "Color picker",
     "decreaseBrushSize": "Decrease brush size",
+    "detect_text": "Detect text",
     "draw": "Brush",
     "eraser": "Eraser",
     "increaseBrushSize": "Increase brush size",

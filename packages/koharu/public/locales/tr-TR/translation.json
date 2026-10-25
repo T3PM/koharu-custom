@@ -506,7 +506,8 @@
     "pan": "Kaydır",
     "remove": "Kaldır",
     "select": "Seç",
-    "text": "Metin"
+    "text": "Metin",
+    "detect_text": "Metin algıla"
   },
   "updater": {
     "available": {
@@ -533,4 +534,4 @@
     "minimize": "Simge durumuna küçült",
     "restore": "Geri yükle"
   }
-}
+}
