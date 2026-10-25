@@ -6,7 +6,16 @@
     "windows": [
       {
         "label": "main",
-        "title": "Koharu (Custom)"
+        "create": false,
+        "width": 1024,
+        "height": 768,
+        "minWidth": 900,
+        "minHeight": 600,
+        "center": true,
+        "title": "Koharu Custom",
+        "decorations": false,
+        "transparent": false,
+        "visible": false
       }
     ]
   },
