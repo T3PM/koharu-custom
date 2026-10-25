@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, ensure};
 use atomicwrites::{AtomicFile, OverwriteBehavior};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -34,6 +34,7 @@ use tokio::sync::watch;
 const CONFIG_DIRECTORY: &str = ".koharu";
 const CONFIG_FILE: &str = "config.toml";
 
+static CONFIG_PATH: OnceLock<PathBuf> = OnceLock::new();
 static MANAGER: OnceLock<Result<Arc<Manager>, String>> = OnceLock::new();
 
 /// Monotonically increasing version of a live configuration value.
@@ -370,10 +371,54 @@ impl Manager {
     }
 }
 
-/// Returns the shared Koharu configuration path: `~/.koharu/config.toml`.
+/// Explicitly configure the configuration file path before it is accessed.
+pub fn configure(path: impl Into<PathBuf>) -> Result<()> {
+    let requested = path.into();
+    ensure!(
+        requested.is_absolute(),
+        "config path must be absolute: {}",
+        requested.display()
+    );
+
+    if let Some(active) = CONFIG_PATH.get() {
+        ensure!(
+            active == &requested,
+            "config path is already {}",
+            active.display()
+        );
+        return Ok(());
+    }
+
+    if let Err(requested) = CONFIG_PATH.set(requested) {
+        let active = CONFIG_PATH
+            .get()
+            .context("config path was configured concurrently without a value")?;
+        ensure!(
+            active == &requested,
+            "config path is already {}",
+            active.display()
+        );
+    }
+    Ok(())
+}
+
+/// Returns the shared Koharu configuration path: `~/.koharu/config.toml` (or custom path if configured).
 pub fn path() -> Result<PathBuf> {
+    if let Some(path) = CONFIG_PATH.get() {
+        return Ok(path.clone());
+    }
+    if let Ok(file) = std::env::var("KOHARU_CONFIG_FILE") {
+        return Ok(PathBuf::from(file));
+    }
+    if let Ok(dir) = std::env::var("KOHARU_CONFIG_DIR") {
+        return Ok(PathBuf::from(dir).join(CONFIG_FILE));
+    }
     let home = dirs::home_dir().context("could not determine the home directory")?;
-    Ok(home.join(CONFIG_DIRECTORY).join(CONFIG_FILE))
+    let dir_name = match std::env::var("KOHARU_PROFILE") {
+        Ok(profile) if !profile.trim().is_empty() => format!(".koharu-{}", profile.trim()),
+        _ => CONFIG_DIRECTORY.to_string(),
+    };
+    Ok(home.join(dir_name).join(CONFIG_FILE))
 }
 
 /// Load or retrieve a live, process-wide top-level configuration section.

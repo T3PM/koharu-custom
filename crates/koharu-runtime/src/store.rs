@@ -49,9 +49,16 @@ impl Store {
     #[must_use]
     pub fn root() -> &'static Path {
         ROOT.get_or_init(|| {
+            if let Ok(root) = std::env::var("KOHARU_STORE_DIR") {
+                return PathBuf::from(root);
+            }
+            let subfolder = match std::env::var("KOHARU_PROFILE") {
+                Ok(profile) if !profile.trim().is_empty() => format!("koharu-{}", profile.trim()),
+                _ => "koharu".to_string(),
+            };
             dirs::cache_dir()
                 .unwrap_or_else(std::env::temp_dir)
-                .join("koharu")
+                .join(subfolder)
                 .join("packages")
         })
     }

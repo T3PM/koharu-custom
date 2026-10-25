@@ -114,6 +114,18 @@ pub fn run(context: tauri::Context<CefRuntime>) -> Result<()> {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(crate::commands::bindings().invoke_handler())
         .setup(move |application| {
+            let identifier = application.config().identifier.clone();
+            if identifier != "Koharu"
+                && std::env::var("KOHARU_CONFIG_DIR").is_err()
+                && std::env::var("KOHARU_CONFIG_FILE").is_err()
+            {
+                if let Some(home) = dirs::home_dir() {
+                    let _ = koharu_config::configure(
+                        home.join(".koharu-custom").join("config.toml"),
+                    );
+                }
+            }
+
             #[cfg(all(target_os = "windows", not(debug_assertions)))]
             koharu_runtime::Store::configure(
                 application
