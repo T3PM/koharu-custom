@@ -11,6 +11,8 @@
     ]
   },
   "bundle": {
+    "createUpdaterArtifacts": false,
+    "targets": ["nsis"],
     "windows": {
       "signCommand": null,
       "nsis": {
@@ -19,6 +21,8 @@
     }
   },
   "plugins": {
-    "updater": null
+    "updater": {
+      "endpoints": []
+    }
   }
 }
