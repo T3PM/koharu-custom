@@ -366,6 +366,7 @@ async fn close_current_project(handle: &AppHandle<CefRuntime>) -> Result<()> {
 #[specta::specta]
 pub(crate) async fn import(
     source: PageImportSource,
+    chapter: Option<String>,
     window: WebviewWindow<CefRuntime>,
     desktop: State<'_, Desktop>,
     project: State<'_, CurrentProject>,
@@ -438,8 +439,9 @@ pub(crate) async fn import(
                     f64::from(imported.width),
                     f64::from(imported.height),
                 );
-                if let Some(chapter) = imported.chapter {
-                    draft = draft.with_chapter(chapter);
+                let assigned_chapter = chapter.as_ref().or(imported.chapter.as_ref());
+                if let Some(ch) = assigned_chapter {
+                    draft = draft.with_chapter(ch.clone());
                 }
                 let page = edit.add_page(draft, At::End)?;
                 edit.set_asset(

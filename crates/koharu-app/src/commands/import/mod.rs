@@ -81,6 +81,18 @@ fn decode(path: &Path, source: EncodedPage, chapter: Option<String>) -> Result<P
 
 
 
+#[cfg(test)]
+pub(super) fn import(paths: Vec<PathBuf>) -> Result<Vec<Page>> {
+    let entries = paths
+        .into_iter()
+        .map(|path| ImportEntry {
+            path,
+            chapter: None,
+        })
+        .collect();
+    import_entries(entries)
+}
+
 pub(super) fn import_entries(mut items: Vec<ImportEntry>) -> Result<Vec<Page>> {
     alphanumeric_sort::sort_slice_by_os_str_key(&mut items, |item| {
         item.path.file_name().unwrap_or_else(|| item.path.as_os_str())

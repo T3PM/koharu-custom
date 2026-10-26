@@ -127,6 +127,22 @@ pub(crate) async fn export(
             None
         };
         let width = pages.len().to_string().len().max(4);
+        let safe_project_name = name.replace(['<', '>', ':', '"', '/', '\\', '|', '?', '*'], "_");
+        let safe_project_name = safe_project_name
+            .trim()
+            .trim_end_matches(|character: char| character == '.' || character.is_whitespace());
+        let safe_project_name = if safe_project_name.is_empty() {
+            "project"
+        } else {
+            safe_project_name
+        };
+        let project_dir = if matches!(format, ExportFormat::Png | ExportFormat::Psd) {
+            let dir = destination.join(safe_project_name);
+            let _ = std::fs::create_dir_all(&dir);
+            dir
+        } else {
+            destination.clone()
+        };
         // Async preparation and indexed encoding both preserve project order.
         for (index, (page_id, bytes)) in pages.into_iter().zip(images).enumerate() {
             let page = snapshot.page(page_id)?.page()?;
@@ -145,15 +161,23 @@ pub(crate) async fn export(
             );
             let target_dir = if let Some(ref ch) = page.chapter {
                 let safe_ch = ch.replace(['<', '>', ':', '"', '/', '\\', '|', '?', '*'], "_");
-                let dir = destination.join(safe_ch);
+                let safe_ch = safe_ch
+                    .trim()
+                    .trim_end_matches(|character: char| character == '.' || character.is_whitespace());
+                let safe_ch = if safe_ch.is_empty() { "chapter" } else { safe_ch };
+                let dir = project_dir.join(safe_ch);
                 let _ = std::fs::create_dir_all(&dir);
                 dir
             } else {
-                destination.clone()
+                project_dir.clone()
             };
             if let Some(archive) = &mut archive {
                 let archive_entry = if let Some(ref ch) = page.chapter {
                     let safe_ch = ch.replace(['<', '>', ':', '"', '/', '\\', '|', '?', '*'], "_");
+                    let safe_ch = safe_ch
+                        .trim()
+                        .trim_end_matches(|character: char| character == '.' || character.is_whitespace());
+                    let safe_ch = if safe_ch.is_empty() { "chapter" } else { safe_ch };
                     format!("{safe_ch}/{name}")
                 } else {
                     name
@@ -344,6 +368,31 @@ pub(crate) async fn export_chapter(
             None
         };
         let width = pages.len().to_string().len().max(4);
+        let safe_project_name = name.replace(['<', '>', ':', '"', '/', '\\', '|', '?', '*'], "_");
+        let safe_project_name = safe_project_name
+            .trim()
+            .trim_end_matches(|character: char| character == '.' || character.is_whitespace());
+        let safe_project_name = if safe_project_name.is_empty() {
+            "project"
+        } else {
+            safe_project_name
+        };
+        let safe_chapter_name = chapter.replace(['<', '>', ':', '"', '/', '\\', '|', '?', '*'], "_");
+        let safe_chapter_name = safe_chapter_name
+            .trim()
+            .trim_end_matches(|character: char| character == '.' || character.is_whitespace());
+        let safe_chapter_name = if safe_chapter_name.is_empty() {
+            "chapter"
+        } else {
+            &safe_chapter_name
+        };
+        let target_dir = if matches!(format, ExportFormat::Png | ExportFormat::Psd) {
+            let dir = destination.join(format!("{safe_project_name} - {safe_chapter_name}"));
+            let _ = std::fs::create_dir_all(&dir);
+            dir
+        } else {
+            destination.clone()
+        };
         for (index, (page_id, bytes)) in pages.into_iter().zip(images).enumerate() {
             let page = snapshot.page(page_id)?.page()?;
             let name = page
@@ -365,7 +414,7 @@ pub(crate) async fn export_chapter(
                 archive.start_file(name, options)?;
                 archive.write_all(&bytes)?;
             } else {
-                std::fs::write(destination.join(name), bytes)?;
+                std::fs::write(target_dir.join(name), bytes)?;
             }
         }
         if let Some(archive) = archive {

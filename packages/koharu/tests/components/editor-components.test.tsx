@@ -23,6 +23,7 @@ import { StatusBar } from '@/components/editor/StatusBar'
 import { ToolBar } from '@/components/editor/ToolBar'
 import { ProviderPreferences } from '@/components/preferences/ProviderPreferences'
 import { SettingsPage } from '@/components/preferences/SettingsPage'
+import { TypesettingPreferences } from '@/components/preferences/TypesettingPreferences'
 import {
   fontsKey,
   pageKey,
@@ -1862,5 +1863,148 @@ describe('greenfield editor', () => {
     expect(screen.getAllByRole('progressbar')).toHaveLength(1)
     expect(screen.queryByText('one.ttf')).not.toBeInTheDocument()
     expect(screen.queryByText('two.ttf')).not.toBeInTheDocument()
+  })
+
+  it('groups pages by chapter folders and renders them inside the folder', async () => {
+    installProject()
+    queryClient.setQueryData(pagesKey, [
+      {
+        id: 'page-1',
+        label: 'Page 1',
+        size: { width: 1000, height: 1500 },
+        source_asset: null,
+        layer_count: 0,
+        chapter: 'Chapter 01',
+      },
+      {
+        id: 'page-2',
+        label: 'Page 2',
+        size: { width: 1000, height: 1500 },
+        source_asset: null,
+        layer_count: 0,
+        chapter: 'Chapter 01',
+      },
+    ])
+    render(<PageRail />)
+    expect(screen.getAllByText('Chapter 01').length).toBeGreaterThan(0)
+    expect(screen.getByText('Page 1')).toBeInTheDocument()
+    expect(screen.getByText('Page 2')).toBeInTheDocument()
+  })
+
+  it('renders created chapter folders even when project has no pages yet', async () => {
+    installProject()
+    queryClient.setQueryData(pagesKey, [])
+    useKoharuStore.setState({ selectedPages: [] })
+    vi.spyOn(commands, 'setPageChapter').mockResolvedValue(null)
+    const user = userEvent.setup()
+    render(<PageRail />)
+    expect(screen.getByText('No pages yet')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'New Chapter Folder' }))
+    const input = screen.getByRole('textbox', { name: 'Folder Name' })
+    await user.type(input, 'Chapter 01')
+    await user.click(screen.getByRole('button', { name: 'Create' }))
+
+    expect(screen.getAllByText('Chapter 01').length).toBeGreaterThan(0)
+    expect(screen.getByText('Drop pages here or import')).toBeInTheDocument()
+  })
+
+  it('renders a translate button for text layers', async () => {
+    installProject()
+    render(<Inspector />)
+    const translateBtn = screen.queryByRole('button', { name: 'Translate text' })
+    expect(translateBtn).toBeInTheDocument()
+  })
+
+  it('renders a translate button for group folder layers', async () => {
+    installProject()
+    const groupLayer: Layer = {
+      type: 'group',
+      id: 'group-1',
+      name: 'Text Group',
+      parent: null,
+      role: 'text',
+      visibility: { visible: true, opacity: 1 },
+    }
+    const childTextLayer: Layer = {
+      ...textLayer,
+      id: 'element',
+      parent: 'group-1',
+    }
+    queryClient.setQueryData(pageKey, {
+      id: 'page',
+      label: 'Page 1',
+      size: { width: 1000, height: 1500 },
+      layers: [groupLayer, childTextLayer],
+      regions: [],
+    })
+    render(<Inspector />)
+    const folderTranslateBtn = screen.getByRole('button', { name: 'Translate all text in folder' })
+    expect(folderTranslateBtn).toBeInTheDocument()
+  })
+
+  it('configures default font size and weight in typesetting preferences', async () => {
+    const onChange = vi.fn()
+    const user = userEvent.setup()
+    render(
+      <TypesettingPreferences
+        value={{
+          font_families: ['CCWildWords'],
+          dialogue_font: null,
+          sfx_font: null,
+          narration_font: null,
+          font_size: null,
+          font_weight: null,
+        }}
+        onChange={onChange}
+      />,
+    )
+
+    expect(screen.getByText('Default Typography')).toBeInTheDocument()
+    const sizeInput = screen.getByPlaceholderText('Auto-fit')
+    fireEvent.change(sizeInput, { target: { value: '18' } })
+    expect(onChange).toHaveBeenCalledWith(
+      expect.objectContaining({
+        font_size: 18,
+      }),
+    )
+
+    const weightSelect = screen.getByRole('combobox')
+    await user.selectOptions(weightSelect, '700')
+    expect(onChange).toHaveBeenCalledWith(
+      expect.objectContaining({
+        font_weight: 700,
+      }),
+    )
+  })
+
+  it('renders a process folder button on chapter cards and triggers pipeline execution', async () => {
+    installProject()
+    queryClient.setQueryData(pagesKey, [
+      {
+        id: 'page-1',
+        label: 'Page 1',
+        size: { width: 1000, height: 1500 },
+        source_asset: null,
+        layer_count: 0,
+        chapter: 'Chapter 01',
+      },
+    ])
+    const processSpy = vi.spyOn(commands, 'process').mockResolvedValue(null as any)
+    const user = userEvent.setup()
+    render(<PageRail />)
+
+    const processBtn = screen.getByRole('button', { name: 'Process all in folder' })
+    expect(processBtn).toBeInTheDocument()
+
+    await user.click(processBtn)
+    expect(screen.getByText('Stages')).toBeInTheDocument()
+    const runBtn = screen.getByRole('button', { name: 'Process Chapter' })
+    await user.click(runBtn)
+
+    expect(processSpy).toHaveBeenCalledWith(
+      { scope: 'pages', value: ['page-1'] },
+      expect.anything(),
+    )
   })
 })

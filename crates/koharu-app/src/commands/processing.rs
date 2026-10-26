@@ -297,3 +297,13 @@ pub(crate) async fn stop_job(
     stop.stop();
     Ok(())
 }
+
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn unload_pipeline_models(
+    handle: AppHandle<CefRuntime>,
+) -> std::result::Result<(), Error> {
+    let pipeline = handle.state::<koharu_pipeline::Pipeline>().inner();
+    pipeline.unload_all();
+    Ok(())
+}

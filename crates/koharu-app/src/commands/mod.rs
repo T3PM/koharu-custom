@@ -2,6 +2,7 @@ pub(crate) mod agent;
 pub(crate) mod canvas;
 pub(crate) mod editing;
 pub(crate) mod fonts;
+pub(crate) mod glossary;
 pub(crate) mod import;
 pub(crate) mod lifecycle;
 pub(crate) mod output;
@@ -88,6 +89,7 @@ pub fn bindings() -> tauri_specta::Builder<tauri_runtime_cef::CefRuntime> {
             editing::redo,
             processing::process,
             processing::stop_job,
+            processing::unload_pipeline_models,
             output::export,
             output::get_thumbnail,
             fonts::get_fonts,
@@ -110,6 +112,21 @@ pub fn bindings() -> tauri_specta::Builder<tauri_runtime_cef::CefRuntime> {
             editing::set_page_chapter,
             lifecycle::import_folder_as_project,
             output::export_chapter,
+            glossary::get_glossary,
+            glossary::set_glossary_enabled,
+            glossary::add_glossary_entry,
+            glossary::update_glossary_entry,
+            glossary::delete_glossary_entries,
+            glossary::preview_glossary_import,
+            glossary::apply_glossary_import,
+            glossary::export_glossary,
+            glossary::scan_glossary,
+            glossary::translate_glossary_entries,
+            editing::delete_folder,
+            project::get_trash_items,
+            project::restore_trash_item,
+            project::delete_trash_item,
+            project::clear_trash,
         ])
         .disable_serde_phases()
         .error_handling(ErrorHandlingMode::Throw)

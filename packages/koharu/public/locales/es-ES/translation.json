@@ -238,7 +238,9 @@
     "sourceLabel": "Texto original de {{name}}",
     "textName": "Texto {{index}}",
     "title": "Capas",
-    "translationLabel": "Traducción de {{name}}"
+    "translationLabel": "Traducción de {{name}}",
+    "translate": "Traducir texto",
+    "translateFolder": "Traducir todo el texto en la carpeta"
   },
   "menu": {
     "about": "Acerca de",
@@ -298,7 +300,11 @@
     "rename": "Cambiar nombre",
     "renameDescription": "Elige un nombre nuevo para esta página.",
     "renameTitle": "Cambiar nombre de página",
-    "selected": "{{count}} seleccionadas"
+    "selected": "{{count}} seleccionadas",
+    "translateChapter": "Traducir capítulo",
+    "translatingChapter": "Traduciendo capítulo…",
+    "processFolder": "Procesar todo en la carpeta",
+    "runOnChapter": "Procesar capítulo"
   },
   "outputPicker": {
     "instructions": "Instrucciones de traducción",
@@ -460,7 +466,24 @@
       "loadError": "No se pudieron cargar las fuentes. Las familias existentes aún se pueden eliminar.",
       "loadingFonts": "Cargando fuentes…",
       "removeFamily": "Eliminar {{family}}",
-      "title": "Composición tipográfica"
+      "title": "Composición tipográfica",
+      "rolePresets": "Preajustes de fuentes por rol",
+      "rolePresetsDescription": "Especifica familias de fuentes personalizadas para diálogo, efectos de sonido (SFX) y narración.",
+      "dialogueFont": "Diálogo",
+      "sfxFont": "SFX",
+      "narrationFont": "Narración",
+      "defaultFallback": "Fuente de reserva predeterminada",
+      "clearDialogueFont": "Borrar fuente de diálogo",
+      "clearSfxFont": "Borrar fuente de SFX",
+      "clearNarrationFont": "Borrar fuente de narración",
+      "typographyDefaults": "Tipografía predeterminada",
+      "typographyDefaultsDescription": "Configura el tamaño y peso de fuente predeterminados aplicados a los cuadros de texto detectados.",
+      "fontSize": "Tamaño de fuente (px)",
+      "fontSizeAuto": "Ajuste automático",
+      "clearFontSize": "Borrar tamaño de fuente predeterminado",
+      "fontWeight": "Peso de fuente",
+      "fontWeightDefault": "Predeterminado (Normal)",
+      "clearFontWeight": "Borrar peso de fuente predeterminado"
     }
   },
   "start": {
@@ -533,5 +556,106 @@
     "maximize": "Maximizar",
     "minimize": "Minimizar",
     "restore": "Restaurar"
+  },
+  "glossary": {
+    "actions": "Acciones del glosario",
+    "add": "Añadir término",
+    "allCategories": "Todas las categorías",
+    "categoryEntry": "Categoría de {{source}}",
+    "categoryFilter": "Filtro de categoría",
+    "confidence": "{{value}} % de confianza",
+    "confirmLanguageMismatch": "Importar pese a la diferencia de idioma",
+    "deleteEntry": "Eliminar {{source}}",
+    "deleteSelected": "Eliminar {{count}} seleccionados",
+    "dismissImportError": "Cerrar error de importación",
+    "empty": "Aún no hay términos",
+    "emptyDescription": "Analiza el proyecto o añade un término manualmente.",
+    "enable": "Activar glosario",
+    "enableEntry": "Activar {{source}}",
+    "examples": "Ejemplos",
+    "export": "Exportar glosario",
+    "exporting": "Exportando glosario…",
+    "filters": {
+      "all": "Todos los estados",
+      "disabled": "Desactivado",
+      "not-present": "No presente",
+      "translated": "Traducido",
+      "untranslated": "Sin traducir"
+    },
+    "import": "Importar glosario",
+    "importAction": "Importar glosario",
+    "importAdded": "{{count}} por añadir",
+    "importConflicts": "{{count}} conflictos",
+    "importDescription": "Revisa los cambios antes de aplicarlos al proyecto.",
+    "importFailed": "No se pudo importar el glosario.",
+    "importIdentical": "{{count}} idénticos",
+    "importMalformed": "El archivo del glosario no es válido. Elige un archivo JSON válido.",
+    "importStrategy": "Estrategia de conflictos",
+    "importSummary": "Resumen de importación",
+    "importTitle": "Importar glosario",
+    "keepExisting": "Conservar existentes",
+    "keepExistingDescription": "Conserva los valores del proyecto cuando haya conflictos.",
+    "kinds": {
+      "ability": "Habilidad",
+      "item": "Objeto",
+      "organization": "Organización",
+      "other": "Otro",
+      "person": "Persona",
+      "place": "Lugar",
+      "term": "Término"
+    },
+    "languageField": {
+      "source": "Idioma de origen",
+      "target": "Idioma de destino"
+    },
+    "languageMismatch": "El glosario importado usa idiomas diferentes.",
+    "loadError": "No se pudo cargar el glosario.",
+    "newCategory": "Categoría del término nuevo",
+    "newSource": "Término de origen nuevo",
+    "newTranslation": "Traducción nueva",
+    "noResults": "No hay términos coincidentes",
+    "noResultsDescription": "Cambia la búsqueda o los filtros.",
+    "notPresent": "No aparece en el último análisis",
+    "occurrences": "{{count}} apariciones",
+    "occurrences_one": "{{count}} aparición",
+    "occurrences_other": "{{count}} apariciones",
+    "origins": {
+      "automatic": "Traducción automática",
+      "detected": "Detectado",
+      "imported": "Importado",
+      "user": "Editado por el usuario"
+    },
+    "phase": {
+      "extractingTerms": "Extrayendo términos",
+      "preparingOcr": "Preparando OCR",
+      "translating": "Traduciendo términos"
+    },
+    "replaceExisting": "Reemplazar existentes",
+    "replaceExistingDescription": "Usa los valores importados cuando haya conflictos.",
+    "rescan": "Volver a analizar el glosario",
+    "saveTerm": "Guardar término",
+    "scan": "Analizar glosario",
+    "scanning": "Analizando glosario…",
+    "search": "Buscar en el glosario",
+    "searchPlaceholder": "Buscar origen o traducción",
+    "selectEntry": "Seleccionar {{source}}",
+    "selectVisible": "Seleccionar términos visibles",
+    "selectedCount": "{{count}} seleccionados",
+    "sourceEntry": "Término de origen {{source}}",
+    "stateFilter": "Filtro de estado",
+    "status": {
+      "available": "Disponible",
+      "stale": "Requiere otro análisis",
+      "unscanned": "Sin analizar"
+    },
+    "title": "Glosario",
+    "translateSelected": "Traducir seleccionados",
+    "translateUntranslated": "Traducir los no traducidos",
+    "translating": "Traduciendo términos…",
+    "translationEntry": "Traducción de {{source}}",
+    "unavailable": "Glosario no disponible",
+    "unavailableDescription": "Abre un proyecto para gestionar su glosario.",
+    "untranslated": "Sin traducir",
+    "waitingConfirmation": "Esperando confirmación"
   }
-}
+}

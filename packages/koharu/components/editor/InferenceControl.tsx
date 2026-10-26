@@ -361,7 +361,7 @@ function RuntimeSelector({
   )
 }
 
-function SelectorRow({
+export function SelectorRow({
   label,
   value,
   onClick,
@@ -388,7 +388,7 @@ function SelectorRow({
   )
 }
 
-function SelectorPanel({
+export function SelectorPanel({
   title,
   onBack,
   children,
@@ -418,7 +418,7 @@ function SelectorPanel({
   )
 }
 
-function SelectorOption<Value extends string>({
+export function SelectorOption<Value extends string>({
   value,
   label,
   detail,
@@ -451,7 +451,7 @@ function SelectorOption<Value extends string>({
   )
 }
 
-function availableModels(
+export function availableModels(
   selected: ModelSelection | null,
   models: Model[],
   providers: ProviderPreference[],

@@ -1558,3 +1558,125 @@ async fn user_promotion_protects_generated_entity_and_relation_lifecycle() {
         Err(Error::Authorship(_))
     ));
 }
+
+#[tokio::test]
+async fn textbox_edits_preserve_inpainted_raster_layer_assets() {
+    let mut session = Session::memory().await.unwrap();
+    let source_role = AssetRole::new("source").unwrap();
+    let mut page_id = None;
+    let mut cleanup_layer_id = None;
+    let mut text_layer_id = None;
+    let mut text_content_id = None;
+
+    let init = session
+        .snapshot()
+        .patch(|edit| {
+            let page = edit.add_page(page(), At::End)?;
+            let cleanup = edit.add_entity(page, At::End)?;
+            edit.set(
+                cleanup,
+                &RasterLayer {
+                    origin: Origin::User,
+                    name: "Cleanup".to_owned(),
+                    kind: RasterLayerKind::Cleanup,
+                },
+            )?;
+            edit.set_asset(
+                cleanup,
+                &source_role,
+                AssetInput::new(
+                    Arc::<[u8]>::from(&b"inpainted clean plate bytes"[..]),
+                    "image/png",
+                    AssetMetadata {
+                        width: Some(100),
+                        height: Some(100),
+                        attributes: BTreeMap::new(),
+                    },
+                ),
+            )?;
+
+            let content = edit.add_text_content(page, At::End)?;
+            edit.set(content, &source("Hello world"))?;
+            let layer = edit.add_text_layer(
+                page,
+                At::End,
+                content,
+                &TextLayout {
+                    origin: Origin::User,
+                    kind: TextLayoutKind::Paragraph,
+                    angle_degrees: None,
+                },
+            )?;
+
+            page_id = Some(page);
+            cleanup_layer_id = Some(cleanup);
+            text_layer_id = Some(layer);
+            text_content_id = Some(content);
+            Ok(())
+        })
+        .unwrap();
+
+    let snapshot = session.commit(init).await.unwrap().snapshot;
+    let cleanup = cleanup_layer_id.unwrap();
+    let layer = text_layer_id.unwrap();
+    let content = text_content_id.unwrap();
+
+    let initial_asset = snapshot.asset(cleanup, &source_role).unwrap().unwrap();
+    let initial_blob = initial_asset.blob;
+
+    let text_edit = snapshot
+        .patch(|edit| {
+            edit.set(
+                layer,
+                &TextLayout {
+                    origin: Origin::User,
+                    kind: TextLayoutKind::Point,
+                    angle_degrees: Some(15.0),
+                },
+            )?;
+            edit.set(
+                content,
+                &Translation {
+                    text: Authored::user("Translated text".to_owned()),
+                    language: Some(LanguageTag::new("en").unwrap()),
+                },
+            )?;
+            edit.set(
+                layer,
+                &Typography {
+                    origin: Origin::User,
+                    preferred_font: Some("Comic Sans".to_owned()),
+                    font_weight: Some(700),
+                    font_style: None,
+                    size: Some(16.0),
+                    auto_fit: false,
+                    color: Some([0, 0, 0, 255]),
+                    stroke_color: None,
+                    stroke_width: None,
+                    alignment: None,
+                    writing_mode: None,
+                    extensions: BTreeMap::new(),
+                },
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+    let after_text_edit = session.commit(text_edit).await.unwrap().snapshot;
+
+    let cleanup_raster = after_text_edit
+        .component::<RasterLayer>(cleanup)
+        .unwrap()
+        .expect("cleanup layer component must exist");
+    assert_eq!(cleanup_raster.kind, RasterLayerKind::Cleanup);
+
+    let preserved_asset = after_text_edit
+        .asset(cleanup, &source_role)
+        .unwrap()
+        .expect("cleanup source asset must exist");
+    assert_eq!(preserved_asset.blob, initial_blob);
+
+    let bytes = after_text_edit.read_blob(preserved_asset.blob).await.unwrap();
+    assert_eq!(bytes.as_ref(), b"inpainted clean plate bytes");
+}
+

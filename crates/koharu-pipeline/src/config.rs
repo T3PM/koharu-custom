@@ -487,6 +487,9 @@ mod tests {
                 prompt: "Keep the line art.".to_owned(),
             }),
             processor: ProcessorConfig::default(),
+            ocr_options: OcrOptions::default(),
+            export_options: ExportOptions::default(),
+            hardware_options: HardwareOptions::default(),
         };
         let document = toml::to_string(&config).unwrap();
         assert!(document.contains("[detection]\nmodel = \"koharu-layout-rfdetr-seg-2xl\""));

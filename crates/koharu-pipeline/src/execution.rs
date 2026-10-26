@@ -220,6 +220,14 @@ impl<'a> Execution<'a> {
         if self.scheduler.complete_stage(page, stage) {
             self.images.remove(&page);
         }
+        if self.scheduler.stage_finished_globally(stage) {
+            tracing::info!(
+                target: "koharu_metrics",
+                stage = %stage,
+                "evicting stage model from VRAM after completing all pages"
+            );
+            self.runner.unload(stage);
+        }
         self.completed += 1;
     }
 

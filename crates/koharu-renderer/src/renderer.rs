@@ -2072,6 +2072,7 @@ mod tests {
         let font = crate::fonts::FontSystem::new().first_font().unwrap();
         let renderer = Renderer::with_typesetting(TypesettingConfig {
             font_families: vec![font.family_name().to_owned()],
+            ..Default::default()
         });
         let base_compiled = renderer.compile(&base, page).unwrap();
         let first = base_compiled

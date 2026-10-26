@@ -15,6 +15,8 @@ export function CanvasCommandBar() {
 
   const run = (selection: PipelineScope, stages: Stage[]) => {
     if (!page) return
+    const activePageSummary = (pages ?? []).find((p) => p.id === page.id)
+    const activeChapter = activePageSummary?.chapter ?? null
     const scope: Scope =
       selection === 'project'
         ? { scope: 'project' }
@@ -24,7 +26,7 @@ export function CanvasCommandBar() {
             ? {
                 scope: 'pages',
                 value: (pages ?? [])
-                  .filter((p) => ((p as any).chapter ?? null) === ((page as any).chapter ?? null))
+                  .filter((p) => (p.chapter ?? null) === activeChapter)
                   .map((p) => p.id),
               }
             : { scope: 'pages', value: [page.id] }

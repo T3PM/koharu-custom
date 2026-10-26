@@ -238,7 +238,9 @@
     "sourceLabel": "{{name}} 的原文",
     "textName": "文字 {{index}}",
     "title": "圖層",
-    "translationLabel": "{{name}} 的譯文"
+    "translationLabel": "{{name}} 的譯文",
+    "translate": "翻譯文字",
+    "translateFolder": "翻譯資料夾中的所有文字"
   },
   "menu": {
     "about": "關於",
@@ -298,7 +300,11 @@
     "rename": "重新命名",
     "renameDescription": "為此頁面選擇新名稱。",
     "renameTitle": "重新命名頁面",
-    "selected": "已選擇 {{count}}"
+    "selected": "已選擇 {{count}}",
+    "translateChapter": "翻譯章節",
+    "translatingChapter": "正在翻譯章節…",
+    "processFolder": "處理資料夾中的所有項目",
+    "runOnChapter": "處理章節"
   },
   "outputPicker": {
     "instructions": "翻譯指示",
@@ -460,7 +466,24 @@
       "loadError": "無法載入字型。仍可移除現有字型家族。",
       "loadingFonts": "正在載入字型…",
       "removeFamily": "移除 {{family}}",
-      "title": "排版"
+      "title": "排版",
+      "rolePresets": "角色字型預設",
+      "rolePresetsDescription": "為對白、音效（SFX）和旁白指定自訂字型系列。",
+      "dialogueFont": "對白",
+      "sfxFont": "音效",
+      "narrationFont": "旁白",
+      "defaultFallback": "預設後備字型",
+      "clearDialogueFont": "清除對白字型",
+      "clearSfxFont": "清除音效字型",
+      "clearNarrationFont": "清除旁白字型",
+      "typographyDefaults": "預設字型排版",
+      "typographyDefaultsDescription": "設定套用至新偵測文字框的預設字型大小與粗細。",
+      "fontSize": "字型大小 (px)",
+      "fontSizeAuto": "自動符合",
+      "clearFontSize": "清除預設字型大小",
+      "fontWeight": "字型粗細",
+      "fontWeightDefault": "預設 (標準)",
+      "clearFontWeight": "清除預設字型粗細"
     }
   },
   "start": {
@@ -533,5 +556,106 @@
     "maximize": "最大化",
     "minimize": "最小化",
     "restore": "還原"
+  },
+  "glossary": {
+    "actions": "術語表操作",
+    "add": "新增術語",
+    "allCategories": "全部類別",
+    "categoryEntry": "{{source}} 的類別",
+    "categoryFilter": "類別篩選",
+    "confidence": "信心度 {{value}}%",
+    "confirmLanguageMismatch": "確認語言不一致並匯入",
+    "deleteEntry": "刪除 {{source}}",
+    "deleteSelected": "刪除選取的 {{count}} 項",
+    "dismissImportError": "關閉匯入錯誤",
+    "empty": "目前沒有術語",
+    "emptyDescription": "掃描專案或手動新增術語。",
+    "enable": "啟用術語表",
+    "enableEntry": "啟用 {{source}}",
+    "examples": "範例",
+    "export": "匯出術語表",
+    "exporting": "正在匯出術語表…",
+    "filters": {
+      "all": "全部狀態",
+      "disabled": "已停用",
+      "not-present": "本次未出現",
+      "translated": "已翻譯",
+      "untranslated": "未翻譯"
+    },
+    "import": "匯入術語表",
+    "importAction": "匯入術語表",
+    "importAdded": "新增 {{count}} 項",
+    "importConflicts": "衝突 {{count}} 項",
+    "importDescription": "套用到專案前，請先檢查變更。",
+    "importFailed": "無法匯入術語表。",
+    "importIdentical": "相同 {{count}} 項",
+    "importMalformed": "術語表檔案格式錯誤，請選擇有效的 JSON 檔案。",
+    "importStrategy": "衝突處理方式",
+    "importSummary": "匯入摘要",
+    "importTitle": "匯入術語表",
+    "keepExisting": "保留現有內容",
+    "keepExistingDescription": "相同術語衝突時保留專案中的值。",
+    "kinds": {
+      "ability": "能力／招式",
+      "item": "物件",
+      "organization": "組織",
+      "other": "其他",
+      "person": "人物",
+      "place": "地點",
+      "term": "術語"
+    },
+    "languageField": {
+      "source": "來源語言",
+      "target": "目標語言"
+    },
+    "languageMismatch": "匯入的術語表使用不同語言。",
+    "loadError": "無法載入術語表。",
+    "newCategory": "新術語類別",
+    "newSource": "新來源詞",
+    "newTranslation": "新譯名",
+    "noResults": "沒有相符的術語",
+    "noResultsDescription": "調整搜尋或篩選條件以查看更多術語。",
+    "notPresent": "最新掃描中未出現",
+    "occurrences": "出現 {{count}} 次",
+    "occurrences_one": "出現 {{count}} 次",
+    "occurrences_other": "出現 {{count}} 次",
+    "origins": {
+      "automatic": "自動翻譯",
+      "detected": "自動辨識",
+      "imported": "匯入",
+      "user": "使用者編輯"
+    },
+    "phase": {
+      "extractingTerms": "正在辨識術語",
+      "preparingOcr": "正在準備 OCR",
+      "translating": "正在翻譯術語"
+    },
+    "replaceExisting": "取代現有內容",
+    "replaceExistingDescription": "相同術語衝突時使用匯入值。",
+    "rescan": "重新掃描術語表",
+    "saveTerm": "儲存術語",
+    "scan": "掃描術語表",
+    "scanning": "正在掃描術語表…",
+    "search": "搜尋術語表",
+    "searchPlaceholder": "搜尋來源詞或譯名",
+    "selectEntry": "選取 {{source}}",
+    "selectVisible": "選取可見術語",
+    "selectedCount": "已選取 {{count}} 項",
+    "sourceEntry": "來源詞 {{source}}",
+    "stateFilter": "狀態篩選",
+    "status": {
+      "available": "可用",
+      "stale": "需要重新掃描",
+      "unscanned": "尚未掃描"
+    },
+    "title": "術語表",
+    "translateSelected": "翻譯選取的術語",
+    "translateUntranslated": "翻譯未譯術語",
+    "translating": "正在翻譯術語…",
+    "translationEntry": "{{source}} 的譯名",
+    "unavailable": "術語表無法使用",
+    "unavailableDescription": "開啟專案後即可管理術語表。",
+    "untranslated": "未翻譯",
+    "waitingConfirmation": "等待確認"
   }
-}
+}

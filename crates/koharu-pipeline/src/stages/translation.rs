@@ -1,6 +1,6 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use koharu_scene::{Authored, LanguageTag, Origin, SourceText, Translation};
+use koharu_scene::{Authored, Glossary, LanguageTag, Origin, SourceText, Translation};
 use koharu_translator::{TranslationRequest, Translator};
 
 use crate::TranslationConfig;
@@ -54,7 +54,28 @@ impl StageProcessor for Processor {
             targets.iter().map(|(_, source)| source.clone()),
             self.config.target_language,
         );
-        if let Some(instructions) = self.config.instructions.as_deref() {
+        let mut instructions = self.config.instructions.clone().unwrap_or_default();
+        if let Ok(Some(glossary)) = input.scene.project_component::<Glossary>()
+            && glossary.enabled
+        {
+            let mut terms = Vec::new();
+            for entry in &glossary.entries {
+                if entry.enabled
+                    && let Some(trans) = &entry.translation
+                    && !trans.trim().is_empty()
+                {
+                    terms.push(format!("- {}: {}", entry.source.trim(), trans.trim()));
+                }
+            }
+            if !terms.is_empty() {
+                if !instructions.is_empty() {
+                    instructions.push_str("\n\n");
+                }
+                instructions.push_str("Glossary / Character names reference:\n");
+                instructions.push_str(&terms.join("\n"));
+            }
+        }
+        if !instructions.is_empty() {
             request = request.with_instructions(instructions);
         }
         if Translator::supports_vision(&self.config.model, &self.config.generation)

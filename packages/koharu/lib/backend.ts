@@ -83,3 +83,8 @@ function report(error: unknown): Error {
   receiveError(message)
   return error instanceof Error ? error : new Error(message)
 }
+
+export function reportError(error: unknown): Error {
+  return report(error)
+}
+

@@ -189,6 +189,7 @@ struct DetectedText<'a> {
     bounds: [f32; 4],
     content: EntityId,
     layer: EntityId,
+    inferred: Option<InferredTypography>,
 }
 
 enum RegionOutput<'a> {
@@ -400,15 +401,17 @@ fn write_region<'a>(
     )?;
     write_text_role(edit, content, "dev.koharu.text.free-text", generation)
         .context("failed to set the detected text role")?;
+    let (preferred_font, default_font_size, default_font_weight) =
+        resolve_typesetting_defaults("dev.koharu.text.free-text");
     edit.set(
         layer,
         &Typography {
             origin: Origin::Generated(generation.clone()),
-            preferred_font: None,
-            font_weight: None,
+            preferred_font,
+            font_weight: default_font_weight,
             font_style: None,
-            size: None,
-            auto_fit: true,
+            size: default_font_size,
+            auto_fit: default_font_size.is_none(),
             color: inferred.map(|value| [value.color[0], value.color[1], value.color[2], u8::MAX]),
             stroke_color: inferred
                 .and_then(|value| value.stroke_color)
@@ -429,7 +432,33 @@ fn write_region<'a>(
         bounds: detection.bbox,
         content,
         layer,
+        inferred,
     }))
+}
+
+fn resolve_typesetting_defaults(role: &str) -> (Option<String>, Option<f32>, Option<u16>) {
+    let Ok(config) = koharu_renderer::TypesettingConfig::load() else {
+        return (None, None, None);
+    };
+    let Ok(read) = config.read() else {
+        return (None, None, None);
+    };
+    let role_font = if role.contains("dialogue") {
+        read.dialogue_font.as_ref()
+    } else if role.contains("sfx") || role.contains("onomatopoeia") {
+        read.sfx_font.as_ref()
+    } else if role.contains("narration") || role.contains("free-text") {
+        read.narration_font.as_ref()
+    } else {
+        None
+    };
+    let font = role_font
+        .filter(|font| !font.trim().is_empty())
+        .cloned()
+        .or_else(|| read.font_families.first().cloned());
+    let font_size = read.font_size.map(|s| s as f32);
+    let font_weight = read.font_weight;
+    (font, font_size, font_weight)
 }
 
 fn link_dialogue_regions(
@@ -439,6 +468,11 @@ fn link_dialogue_regions(
 ) -> Result<()> {
     for text in &regions.texts {
         let bubble = containing_bubble(&regions.bubbles, text);
+        let role = if bubble.is_some() {
+            "dev.koharu.text.dialogue"
+        } else {
+            "dev.koharu.text.free-text"
+        };
         if let Some(bubble) = bubble {
             edit.relate::<Inside>(text.entity, bubble.entity)?;
             edit.relate::<FlowsIn>(text.layer, bubble.entity)?;
@@ -446,6 +480,27 @@ fn link_dialogue_regions(
         } else {
             edit.relate::<FitsTo>(text.layer, text.entity)?;
         }
+        let (preferred_font, default_font_size, default_font_weight) =
+            resolve_typesetting_defaults(role);
+        edit.set(
+            text.layer,
+            &Typography {
+                origin: Origin::Generated(generation.clone()),
+                preferred_font,
+                font_weight: default_font_weight,
+                font_style: None,
+                size: default_font_size,
+                auto_fit: default_font_size.is_none(),
+                color: text.inferred.map(|value| [value.color[0], value.color[1], value.color[2], u8::MAX]),
+                stroke_color: text.inferred
+                    .and_then(|value| value.stroke_color)
+                    .map(|color| [color[0], color[1], color[2], u8::MAX]),
+                stroke_width: text.inferred.and_then(|value| value.stroke_width),
+                alignment: None,
+                writing_mode: text.inferred.map(|value| value.writing_mode),
+                extensions: Default::default(),
+            },
+        )?;
     }
     Ok(())
 }
@@ -1958,6 +2013,7 @@ mod tests {
                             bounds: [0.0, 0.0, 1.0, 1.0],
                             content,
                             layer,
+                            inferred: None,
                         }],
                     },
                     &generation,

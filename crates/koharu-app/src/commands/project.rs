@@ -11,14 +11,45 @@ use koharu_scene::{
     TextGroup as SceneTextGroup, TextLayout as SceneTextLayout, TextLayoutKind,
     Translation as SceneTranslation, Typography as SceneTypography, Visibility as SceneVisibility,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use specta::Type;
 use tokio::sync::Mutex;
+use tauri::State;
+use super::{ChannelExt as _, Error};
 
 use super::{
     canvas::Point,
     editing::{GeometryUpdate, TypographyUpdate},
 };
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum TrashKind {
+    Page,
+    Folder,
+    FolderWithPages,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+pub struct TrashPageRecord {
+    pub id: String,
+    pub label: String,
+    pub width: f64,
+    pub height: f64,
+    pub chapter: Option<String>,
+    pub mime_type: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Type)]
+pub struct TrashItem {
+    pub id: String,
+    pub kind: TrashKind,
+    pub name: String,
+    #[specta(type = f64)]
+    pub timestamp: u64,
+    pub chapter: Option<String>,
+    pub pages: Vec<TrashPageRecord>,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RasterStrokeMode {
@@ -255,6 +286,7 @@ impl ProjectLibrary {
 pub(crate) struct Project {
     pub(crate) session: Session,
     pub(crate) name: String,
+    pub(crate) path: PathBuf,
     pub(crate) active_page: Option<EntityId>,
     pub(crate) undo: Vec<Vec<Revision>>,
     pub(crate) redo: Vec<Vec<Revision>>,
@@ -265,25 +297,184 @@ impl Project {
         let session = Session::create(&path)
             .await
             .with_context(|| format!("failed to create {}", path.display()))?;
-        Ok(Self::new(session, name))
+        Ok(Self::new(session, name, path))
     }
 
     pub(crate) async fn open(name: String, path: PathBuf) -> Result<Self> {
         let session = Session::open(&path)
             .await
             .with_context(|| format!("failed to open {}", path.display()))?;
-        Ok(Self::new(session, name))
+        Ok(Self::new(session, name, path))
     }
 
-    fn new(session: Session, name: String) -> Self {
+    pub(crate) fn new(session: Session, name: String, path: PathBuf) -> Self {
         let active_page = session.snapshot().pages().next().map(|page| page.id());
         Self {
             session,
             name,
+            path,
             active_page,
             undo: Vec::new(),
             redo: Vec::new(),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_test(session: Session, name: String) -> Self {
+        Self::new(session, name, PathBuf::from("test.khrproj"))
+    }
+
+    pub(crate) fn trash_dir(&self) -> PathBuf {
+        self.path.join("trash")
+    }
+
+    pub(crate) async fn read_trash_items(&self) -> Result<Vec<TrashItem>> {
+        let manifest_path = self.trash_dir().join("trash.json");
+        if !manifest_path.exists() {
+            return Ok(Vec::new());
+        }
+        let data = tokio::fs::read(&manifest_path).await?;
+        let items: Vec<TrashItem> = serde_json::from_slice(&data).unwrap_or_default();
+        Ok(items)
+    }
+
+    pub(crate) async fn write_trash_items(&self, items: &[TrashItem]) -> Result<()> {
+        let trash_dir = self.trash_dir();
+        tokio::fs::create_dir_all(&trash_dir).await?;
+        let manifest_path = trash_dir.join("trash.json");
+        let data = serde_json::to_vec_pretty(items)?;
+        tokio::fs::write(&manifest_path, data).await?;
+        Ok(())
+    }
+
+    pub(crate) async fn record_trash_pages(
+        &self,
+        pages: &[EntityId],
+        kind: TrashKind,
+        name: String,
+        chapter: Option<String>,
+    ) -> Result<()> {
+        let snapshot = self.snapshot();
+        let trash_dir = self.trash_dir();
+        tokio::fs::create_dir_all(&trash_dir).await?;
+
+        let mut page_records = Vec::new();
+        for &page_id in pages {
+            let Ok(page_val) = snapshot.page(page_id) else { continue };
+            let Ok(page) = page_val.page() else { continue };
+            let page_record_id = uuid::Uuid::new_v4().to_string();
+
+            let mut mime_type = "image/png".to_string();
+            if let Ok(Some(asset)) = snapshot.asset(page_id, &AssetRole::new("source")?) {
+                mime_type = asset.media_type.clone();
+                if let Ok(bytes) = snapshot.read_blob(asset.blob).await {
+                    let file_path = trash_dir.join(format!("{page_record_id}.bin"));
+                    let _ = tokio::fs::write(file_path, bytes).await;
+                }
+            }
+
+            page_records.push(TrashPageRecord {
+                id: page_record_id,
+                label: page.label.clone(),
+                width: page.width,
+                height: page.height,
+                chapter: page.chapter.clone(),
+                mime_type,
+            });
+        }
+
+        if page_records.is_empty() && kind == TrashKind::Page {
+            return Ok(());
+        }
+
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let item = TrashItem {
+            id: uuid::Uuid::new_v4().to_string(),
+            kind,
+            name,
+            timestamp,
+            chapter,
+            pages: page_records,
+        };
+
+        let mut items = self.read_trash_items().await.unwrap_or_default();
+        items.insert(0, item);
+        self.write_trash_items(&items).await?;
+        Ok(())
+    }
+
+    pub(crate) async fn restore_trash_item(&mut self, item_id: String) -> Result<Commit> {
+        let mut items = self.read_trash_items().await?;
+        let index = items
+            .iter()
+            .position(|it| it.id == item_id)
+            .context("trash item not found")?;
+        let item = items.remove(index);
+        let trash_dir = self.trash_dir();
+
+        let snapshot = self.snapshot();
+        let patch = snapshot.patch(|edit| {
+            for page_rec in &item.pages {
+                let bin_file = trash_dir.join(format!("{}.bin", page_rec.id));
+                let bytes = std::fs::read(&bin_file).unwrap_or_default();
+                let mut draft = PageDraft::new(&page_rec.label, page_rec.width, page_rec.height);
+                if let Some(ch) = &page_rec.chapter {
+                    draft = draft.with_chapter(ch.clone());
+                }
+                let page = edit.add_page(draft, At::End)?;
+                if !bytes.is_empty() {
+                    edit.set_asset(
+                        page,
+                        &AssetRole::new("source")?,
+                        AssetInput::new(
+                            bytes,
+                            &page_rec.mime_type,
+                            AssetMetadata {
+                                width: Some(page_rec.width as u32),
+                                height: Some(page_rec.height as u32),
+                                attributes: Default::default(),
+                            },
+                        ),
+                    )?;
+                }
+            }
+            Ok(())
+        })?;
+
+        for page_rec in &item.pages {
+            let bin_file = trash_dir.join(format!("{}.bin", page_rec.id));
+            let _ = tokio::fs::remove_file(bin_file).await;
+        }
+
+        self.write_trash_items(&items).await?;
+        self.commit(patch).await
+    }
+
+    pub(crate) async fn delete_trash_item(&self, item_id: String) -> Result<()> {
+        let mut items = self.read_trash_items().await?;
+        let Some(index) = items.iter().position(|it| it.id == item_id) else {
+            return Ok(());
+        };
+        let item = items.remove(index);
+        let trash_dir = self.trash_dir();
+        for page_rec in &item.pages {
+            let bin_file = trash_dir.join(format!("{}.bin", page_rec.id));
+            let _ = tokio::fs::remove_file(bin_file).await;
+        }
+        self.write_trash_items(&items).await?;
+        Ok(())
+    }
+
+    pub(crate) async fn clear_trash(&self) -> Result<()> {
+        let trash_dir = self.trash_dir();
+        let _ = tokio::fs::remove_dir_all(&trash_dir).await;
+        tokio::fs::create_dir_all(&trash_dir).await?;
+        let _ = self.write_trash_items(&[]).await;
+        Ok(())
     }
 
     pub(crate) fn snapshot(&self) -> Snapshot {
@@ -387,6 +578,19 @@ pub(crate) async fn rename_page(&mut self, page: EntityId, label: String) -> Res
     pub(crate) async fn delete_pages(&mut self, pages: Vec<EntityId>) -> Result<Commit> {
         let snapshot = self.snapshot();
         let pages = Self::unique_roots(&snapshot, pages)?;
+        let label = if pages.len() == 1 {
+            snapshot
+                .page(pages[0])
+                .ok()
+                .and_then(|p| p.page().ok())
+                .map(|p| p.label)
+                .unwrap_or_else(|| "1 page".to_string())
+        } else {
+            format!("{} pages", pages.len())
+        };
+        let _ = self
+            .record_trash_pages(&pages, TrashKind::Page, label, None)
+            .await;
         let patch = snapshot.patch(|edit| {
             for page in pages {
                 edit.remove_entity(page, RemovePolicy::Cascade)?;
@@ -394,6 +598,65 @@ pub(crate) async fn rename_page(&mut self, page: EntityId, label: String) -> Res
             Ok(())
         })?;
         self.commit(patch).await
+    }
+
+    pub(crate) async fn delete_folder(
+        &mut self,
+        name: String,
+        delete_pages: bool,
+    ) -> Result<Commit> {
+        let snapshot = self.snapshot();
+        let folder_pages = snapshot
+            .pages()
+            .filter(|p| p.page().ok().and_then(|p| p.chapter).as_deref() == Some(&name))
+            .map(|p| p.id())
+            .collect::<Vec<_>>();
+
+        if delete_pages {
+            let _ = self
+                .record_trash_pages(
+                    &folder_pages,
+                    TrashKind::FolderWithPages,
+                    name.clone(),
+                    Some(name.clone()),
+                )
+                .await;
+            let patch = snapshot.patch(|edit| {
+                for page in folder_pages {
+                    edit.remove_entity(page, RemovePolicy::Cascade)?;
+                }
+                Ok(())
+            })?;
+            self.commit(patch).await
+        } else {
+            let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let item = TrashItem {
+                id: uuid::Uuid::new_v4().to_string(),
+                kind: TrashKind::Folder,
+                name: name.clone(),
+                timestamp,
+                chapter: Some(name.clone()),
+                pages: Vec::new(),
+            };
+            let mut items = self.read_trash_items().await.unwrap_or_default();
+            items.insert(0, item);
+            let _ = self.write_trash_items(&items).await;
+
+            let patch = snapshot.patch(|edit| {
+                for page_id in folder_pages {
+                    if let Ok(page_node) = snapshot.page(page_id)
+                        && let Ok(page) = page_node.page()
+                    {
+                        edit.set_page(page_id, PageDraft::new(page.label, page.width, page.height))?;
+                    }
+                }
+                Ok(())
+            })?;
+            self.commit(patch).await
+        }
     }
 
     pub(crate) async fn move_page(&mut self, page: EntityId, index: usize) -> Result<Commit> {
@@ -468,15 +731,30 @@ pub(crate) async fn rename_page(&mut self, page: EntityId, label: String) -> Res
             )?;
             layer = Some(added_layer);
             edit.set(added_layer, &geometry)?;
+            let (preferred_font, default_font_size, default_font_weight) =
+                koharu_renderer::TypesettingConfig::load()
+                    .ok()
+                    .and_then(|config| {
+                        config.read().ok().map(|read| {
+                            let font = read
+                                .dialogue_font
+                                .as_ref()
+                                .filter(|f| !f.trim().is_empty())
+                                .cloned()
+                                .or_else(|| read.font_families.first().cloned());
+                            (font, read.font_size.map(|s| s as f32), read.font_weight)
+                        })
+                    })
+                    .unwrap_or((None, None, None));
             edit.set(
                 added_layer,
                 &SceneTypography {
                     origin: Origin::User,
-                    preferred_font: None,
-                    font_weight: None,
+                    preferred_font,
+                    font_weight: default_font_weight,
                     font_style: None,
-                    size: None,
-                    auto_fit: true,
+                    size: default_font_size,
+                    auto_fit: default_font_size.is_none(),
                     color: None,
                     stroke_color: None,
                     stroke_width: None,
@@ -1354,6 +1632,62 @@ fn rasterize_stroke(
     }
 }
 
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn get_trash_items(
+    project: State<'_, CurrentProject>,
+) -> Result<Vec<TrashItem>, Error> {
+    let current = project.project.lock().await;
+    let project = current.as_ref().context("no project is open")?;
+    Ok(project.read_trash_items().await?)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn restore_trash_item(
+    id: String,
+    desktop: State<'_, koharu_desktop::Desktop>,
+    project: State<'_, CurrentProject>,
+    canvas_channel: State<'_, super::canvas::CanvasChannel>,
+    project_channel: State<'_, super::lifecycle::ProjectChannel>,
+) -> Result<(), Error> {
+    let (commit, page, info) = {
+        let mut project = project.project.lock().await;
+        let project = project.as_mut().context("no project is open")?;
+        let commit = project.restore_trash_item(id).await?;
+        project.record_commit(&commit);
+        project.reconcile_page();
+        (commit, project.active_page(), project.info())
+    };
+    let canvas = super::editing::synchronize_canvas(&desktop, &commit, page).await?;
+    canvas_channel.channel.publish(canvas);
+    project_channel.channel.publish(Some(info));
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn delete_trash_item(
+    id: String,
+    project: State<'_, CurrentProject>,
+) -> Result<(), Error> {
+    let current = project.project.lock().await;
+    let project = current.as_ref().context("no project is open")?;
+    project.delete_trash_item(id).await?;
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn clear_trash(
+    project: State<'_, CurrentProject>,
+) -> Result<(), Error> {
+    let current = project.project.lock().await;
+    let project = current.as_ref().context("no project is open")?;
+    project.clear_trash().await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use koharu_scene::{Generation, ProducerId, WritingMode};
@@ -1401,7 +1735,7 @@ mod tests {
             .add_page(PageDraft::new("manual", 100.0, 100.0), At::End)
             .unwrap();
         session.commit(setup.finish().unwrap()).await.unwrap();
-        let mut project = Project::new(session, "test".to_owned());
+        let mut project = Project::new(session, "test".to_owned(), PathBuf::from("test.khrproj"));
 
         let base = project.snapshot();
         let pipeline = base

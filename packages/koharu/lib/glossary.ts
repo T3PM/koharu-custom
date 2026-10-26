@@ -1,0 +1,194 @@
+import type {
+  GlossaryEntryPatch,
+  GlossaryEntryView,
+  GlossaryKind,
+  GlossaryView,
+} from '@koharu/bridge/protocol'
+
+export const glossaryKinds: readonly GlossaryKind[] = [
+  'person',
+  'place',
+  'organization',
+  'item',
+  'ability',
+  'term',
+  'other',
+]
+
+export type GlossaryStateFilter = 'all' | 'translated' | 'untranslated' | 'disabled' | 'not-present'
+
+export interface GlossaryFilters {
+  query: string
+  kind: GlossaryKind | 'all'
+  state: GlossaryStateFilter
+}
+
+export function normalizeGlossaryTranslation(value: string): string | null {
+  return value.trim() || null
+}
+
+export function applyGlossaryReplacements(
+  text: string,
+  entries?: readonly (GlossaryEntryView | { source: string; translation: string | null; enabled: boolean })[] | null,
+): string {
+  if (!text || !entries || entries.length === 0) return text
+  const sorted = [...entries]
+    .filter((e) => e.enabled && e.translation && e.translation.trim().length > 0 && e.source.trim().length > 0)
+    .sort((a, b) => b.source.length - a.source.length)
+
+  let result = text
+  for (const entry of sorted) {
+    const source = entry.source.trim()
+    const target = entry.translation!.trim()
+    if (!source || !target) continue
+    const escaped = source.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    result = result.replace(new RegExp(escaped, 'gi'), target)
+  }
+  return result
+}
+
+export function filterGlossaryEntries(
+  entries: readonly GlossaryEntryView[],
+  filters: GlossaryFilters,
+): GlossaryEntryView[] {
+  const query = filters.query.trim().toLocaleLowerCase()
+  return entries.filter((entry) => {
+    if (filters.kind !== 'all' && entry.kind !== filters.kind) return false
+    if (
+      query &&
+      !`${entry.source}\n${entry.translation ?? ''}`.toLocaleLowerCase().includes(query)
+    ) {
+      return false
+    }
+    switch (filters.state) {
+      case 'translated':
+        return Boolean(entry.translation)
+      case 'untranslated':
+        return !entry.translation
+      case 'disabled':
+        return !entry.enabled
+      case 'not-present':
+        return !entry.presentInLastScan
+      default:
+        return true
+    }
+  })
+}
+
+export function eligibleGlossaryTranslationIds(
+  entries: readonly GlossaryEntryView[],
+  selected?: ReadonlySet<string>,
+): string[] {
+  return entries
+    .filter(
+      (entry) =>
+        entry.enabled && !entry.translation && (selected === undefined || selected.has(entry.id)),
+    )
+    .map((entry) => entry.id)
+}
+
+export function glossaryStatus(view: GlossaryView): 'unscanned' | 'available' | 'stale' {
+  if (view.savedSourceFingerprint === null) return 'unscanned'
+  return view.stale ? 'stale' : 'available'
+}
+
+export function parseGlossaryDocument(text: string): string {
+  let value: unknown
+  try {
+    value = JSON.parse(text)
+  } catch {
+    throw new Error('The glossary file is malformed JSON.')
+  }
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error('The glossary file must contain a JSON document.')
+  }
+  return text
+}
+
+function entryPatch(entry: GlossaryEntryPatch): GlossaryEntryPatch {
+  return {
+    source: entry.source,
+    translation: entry.translation,
+    kind: entry.kind,
+    enabled: entry.enabled,
+  }
+}
+
+interface UpdateQueueOptions<Owner> {
+  initialRevision: number
+  owner: Owner
+  isOwnerCurrent: (owner: Owner) => boolean
+  execute: (revision: number, id: string, patch: GlossaryEntryPatch) => Promise<GlossaryView>
+  onResponse: (view: GlossaryView, current: boolean) => void | Promise<void>
+}
+
+interface PendingUpdate<Owner> {
+  id: string
+  patch: GlossaryEntryPatch
+  owner: Owner
+  generation: number
+  resolve: (view: GlossaryView | undefined) => void
+  reject: (error: unknown) => void
+}
+
+export interface GlossaryEntryUpdateQueue {
+  enqueue: (id: string, patch: GlossaryEntryPatch) => Promise<GlossaryView | undefined>
+  setRevision: (revision: number) => void
+  cancel: () => void
+}
+
+export function createGlossaryEntryUpdateQueue<Owner>({
+  initialRevision,
+  owner,
+  isOwnerCurrent,
+  execute,
+  onResponse,
+}: UpdateQueueOptions<Owner>): GlossaryEntryUpdateQueue {
+  let revision = initialRevision
+  let running = false
+  let active = true
+  let generation = 0
+  const pending: PendingUpdate<Owner>[] = []
+
+  const run = async () => {
+    if (running) return
+    running = true
+    while (pending.length > 0) {
+      const update = pending.shift()!
+      if (!active || !isOwnerCurrent(update.owner)) {
+        update.resolve(undefined)
+        continue
+      }
+      try {
+        const response = await execute(revision, update.id, update.patch)
+        revision = Math.max(revision, response.revision)
+        const current = active && isOwnerCurrent(update.owner) && generation === update.generation
+        await onResponse(response, current)
+        update.resolve(response)
+      } catch (error) {
+        update.reject(error)
+        for (const queued of pending.splice(0)) queued.reject(error)
+        break
+      }
+    }
+    running = false
+  }
+
+  return {
+    enqueue(id, patch) {
+      generation += 1
+      const promise = new Promise<GlossaryView | undefined>((resolve, reject) => {
+        pending.push({ id, patch: entryPatch(patch), owner, generation, resolve, reject })
+      })
+      void run()
+      return promise
+    },
+    setRevision(nextRevision) {
+      revision = Math.max(revision, nextRevision)
+    },
+    cancel() {
+      active = false
+      for (const update of pending.splice(0)) update.resolve(undefined)
+    },
+  }
+}

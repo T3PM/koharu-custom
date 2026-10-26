@@ -485,6 +485,36 @@ fn encode_mask(
     ))
 }
 
+struct RegionCommitter {
+    handle: AppHandle<CefRuntime>,
+}
+
+#[async_trait::async_trait]
+impl koharu_pipeline::Committer for RegionCommitter {
+    async fn commit(
+        &mut self,
+        output: koharu_pipeline::StageOutput,
+    ) -> anyhow::Result<koharu_scene::Snapshot> {
+        let (commit, page) = {
+            let projects = self.handle.state::<CurrentProject>();
+            let mut projects = projects.project.lock().await;
+            let project = projects.as_mut().context("no project is open")?;
+            let Some(commit) = project.commit_rebased(output.patch).await? else {
+                return Ok(project.snapshot());
+            };
+            project.record_commit(&commit);
+            let page = project.active_page();
+            (commit, page)
+        };
+        let snapshot = commit.snapshot.clone();
+        let desktop = self.handle.state::<Desktop>();
+        desktop.synchronize(&commit.snapshot, page, &commit).await?;
+        let canvas = desktop.canvas_state();
+        self.handle.state::<CanvasChannel>().channel.publish(canvas);
+        Ok(snapshot)
+    }
+}
+
 #[tracing::instrument(
     target = "koharu_metrics",
     name = "text_box_detected",
@@ -499,51 +529,95 @@ pub(crate) async fn detect_text_box(
     project: State<'_, CurrentProject>,
     canvas_channel: State<'_, CanvasChannel>,
     processing: State<'_, Processing>,
-    job_channel: State<'_, JobChannel>,
+    _job_channel: State<'_, JobChannel>,
     handle: AppHandle<CefRuntime>,
 ) -> std::result::Result<Option<LayerCommit>, Error> {
-    let page = {
-        let project = project.project.lock().await;
-        let project = project.as_ref().context("no project is open")?;
-        project.active_page().context("the project has no active page")?
+    let (page, initial_snapshot, existing_layers) = {
+        let proj = project.project.lock().await;
+        let proj = proj.as_ref().context("no project is open")?;
+        let page = proj.active_page().context("the project has no active page")?;
+        let snapshot = proj.snapshot();
+        let existing = snapshot
+            .descendants(page)?
+            .map(|e| e.id())
+            .collect::<std::collections::HashSet<_>>();
+        (page, snapshot, existing)
     };
+
+    let id = JobId::new();
+    let stop = koharu_pipeline::StopToken::default();
+    {
+        let mut stops = processing.stops.lock();
+        if !stops.is_empty() {
+            return Err(anyhow::anyhow!("another process is already running").into());
+        }
+        stops.insert(id, stop.clone());
+    }
+
+    struct StopGuard<'a> {
+        stops: &'a parking_lot::Mutex<std::collections::HashMap<JobId, koharu_pipeline::StopToken>>,
+        id: JobId,
+    }
+    impl<'a> Drop for StopGuard<'a> {
+        fn drop(&mut self) {
+            self.stops.lock().remove(&self.id);
+        }
+    }
+    let _guard = StopGuard {
+        stops: &processing.stops,
+        id,
+    };
+
     let bounds = koharu_pipeline::Bounds {
         x: frame.x as f64,
         y: frame.y as f64,
         width: frame.width as f64,
         height: frame.height as f64,
     };
-    let _ = processing::process(
-        handle.clone(),
-        koharu_pipeline::Scope::Region { page, bounds },
-        koharu_pipeline::Operation::Stages {
+
+    let request = koharu_pipeline::Request {
+        operation: koharu_pipeline::Operation::Stages {
             stages: vec![koharu_pipeline::Stage::Detection, koharu_pipeline::Stage::Ocr],
         },
-        project.clone(),
-        processing,
-        job_channel,
-    )
-    .await;
+        scope: koharu_pipeline::Scope::Region { page, bounds },
+        stop,
+        progress: None,
+        inpainting_mask: None,
+    };
 
-    let (commit, _active_page, layer) = {
+    let pipeline = handle.state::<koharu_pipeline::Pipeline>().inner().clone();
+    let mut committer = RegionCommitter {
+        handle: handle.clone(),
+    };
+
+    let execute_result = pipeline.execute(initial_snapshot, request, &mut committer).await;
+    if let Err(err) = execute_result {
+        tracing::warn!("Region detection pipeline error: {err:?}");
+    }
+
+    let (commit, layer) = {
         let mut proj = project.project.lock().await;
         let proj = proj.as_mut().context("no project is open")?;
         let snapshot = proj.snapshot();
         let matched = snapshot.descendants(page)?.find_map(|entity| {
-            if entity.component::<koharu_scene::TextLayout>().ok().flatten().is_some() {
+            if !existing_layers.contains(&entity.id())
+                && entity.component::<koharu_scene::TextLayout>().ok().flatten().is_some()
+            {
                 Some(entity.id())
             } else {
                 None
             }
         });
+
         if let Some(layer) = matched {
-            (snapshot.revision(), proj.active_page(), layer)
+            (snapshot.revision(), layer)
         } else {
             let (commit, layer) = proj.add_text_box(page, frame).await?;
             proj.record_commit(&commit);
-            (commit.revision, proj.active_page(), layer)
+            (commit.revision, layer)
         }
     };
+
     let canvas = desktop.canvas_state();
     canvas_channel.channel.publish(canvas);
     Ok(Some(LayerCommit {

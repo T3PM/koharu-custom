@@ -72,6 +72,17 @@ impl Pipeline {
         self.resources.subscribe()
     }
 
+    pub fn unload_stage(&self, stage: crate::Stage) -> bool {
+        self.current.load().unload(stage)
+    }
+
+    pub fn unload_all(&self) {
+        let runner = self.current.load();
+        for stage in crate::Stage::ALL {
+            runner.unload(stage);
+        }
+    }
+
     #[tracing::instrument(skip_all)]
     pub async fn execute(
         &self,

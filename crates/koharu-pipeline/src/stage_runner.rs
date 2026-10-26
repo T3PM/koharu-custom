@@ -140,8 +140,12 @@ impl StageRunner {
             })
     }
 
+    pub(crate) fn unload(&self, stage: Stage) -> bool {
+        self.stages.unload(stage)
+    }
+
     fn stage_error(&self, stage: Stage, model: &str, failure: AttemptFailure) -> PipelineError {
-        self.stages.unload(stage);
+        self.unload(stage);
         let message = match failure.kind {
             ErrorKind::ModelLoad => format!("failed to load {model}"),
             _ => format!("{model} failed"),

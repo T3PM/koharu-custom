@@ -10,7 +10,7 @@ use super::{
     canvas::{CanvasChannel, Point},
     project::{CurrentProject, Page, Project, Typography},
 };
-async fn synchronize_canvas(
+pub(crate) async fn synchronize_canvas(
     desktop: &Desktop,
     commit: &koharu_scene::Commit,
     page: Option<EntityId>,
@@ -82,6 +82,36 @@ pub(crate) async fn delete_pages(
     };
     let canvas = synchronize_canvas(&desktop, &commit, page).await?;
     canvas_channel.channel.publish(canvas);
+    Ok(())
+}
+
+#[tracing::instrument(
+    target = "koharu_metrics",
+    name = "folder_deleted",
+    skip_all,
+    fields(origin = "user", folder = %name, delete_pages),
+)]
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn delete_folder(
+    name: String,
+    delete_pages: bool,
+    desktop: State<'_, Desktop>,
+    project: State<'_, CurrentProject>,
+    canvas_channel: State<'_, CanvasChannel>,
+    project_channel: State<'_, super::lifecycle::ProjectChannel>,
+) -> Result<(), Error> {
+    let (commit, page, info) = {
+        let mut project = project.project.lock().await;
+        let project = project.as_mut().context("no project is open")?;
+        let commit = project.delete_folder(name, delete_pages).await?;
+        project.record_commit(&commit);
+        project.reconcile_page();
+        (commit, project.active_page(), project.info())
+    };
+    let canvas = synchronize_canvas(&desktop, &commit, page).await?;
+    canvas_channel.channel.publish(canvas);
+    project_channel.channel.publish(Some(info));
     Ok(())
 }
 

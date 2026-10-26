@@ -17,6 +17,8 @@ import {
   Lock,
   Minus,
   Plus,
+  Languages,
+  LoaderCircle,
   RotateCcw,
   Trash2,
   Type,
@@ -35,7 +37,19 @@ import {
   isTextLayer,
   layerChildren,
 } from '@/lib/document'
-import { pageKey, projectKey, queryClient, refresh, useFonts, usePage } from '@/lib/queries'
+import { applyGlossaryReplacements } from '@/lib/glossary'
+import { TranslationSettingsPopover } from '@/components/editor/TranslationSettingsPopover'
+import { executeTranslation, loadTranslationSettings } from '@/lib/translation'
+import {
+  pageKey,
+  projectKey,
+  queryClient,
+  refresh,
+  useFonts,
+  useGlossary,
+  usePage,
+  useProject,
+} from '@/lib/queries'
 import { useKoharuStore } from '@/lib/store'
 import { previewCanvasOpacity } from '@koharu/bridge/canvas'
 import {
@@ -493,13 +507,90 @@ function displayedLayers(layers: Layer[], page: EntityId) {
 function LayersInspector() {
   const { t } = useTranslation()
   const page = usePage().data
+  const project = useProject().data
+  const glossary = useGlossary(project?.name).data
   const selected = useKoharuStore((state) => state.selectedLayers)
   const selectLayers = useKoharuStore((state) => state.selectLayers)
   const [expandedLayer, setExpandedLayer] = useState<EntityId | null>(
     selected.length === 1 ? (selected[0] ?? null) : null,
   )
   const [movingLayer, setMovingLayer] = useState<EntityId | null>(null)
+  const [translatingLayer, setTranslatingLayer] = useState<EntityId | null>(null)
+  const preferences = useKoharuStore((state) => state.preferences)
   const anchor = useRef<EntityId | null>(null)
+
+  const translateLayer = async (layer: Layer) => {
+    if (!page) return
+    if (layer.type !== 'text' && !isGroupLayer(layer)) return
+
+    const translateSingleText = async (textLayer: Layer) => {
+      if (textLayer.type !== 'text') return
+      const sourceText = textLayer.content.source?.text || textLayer.content.translation?.text || ''
+      if (!sourceText.trim()) return
+
+      const settings = loadTranslationSettings()
+      const targetLang = settings.targetLanguage || preferences?.pipeline?.translation?.target_language || 'en'
+
+      if (settings.provider === 'local') {
+        await call(commands.setTranslation, textLayer.id, null)
+        await call(commands.process, { scope: 'entities', value: [textLayer.id] }, { operation: 'only', stage: 'translation' })
+        return
+      }
+
+      const glossaryEntries = glossary?.enabled ? glossary.entries : []
+      const translated = await executeTranslation(sourceText, settings, targetLang, glossaryEntries)
+      if (translated) {
+        const finalTranslated =
+          glossary?.enabled && glossary.entries.length > 0
+            ? applyGlossaryReplacements(translated, glossary.entries)
+            : translated
+        await call(commands.setTranslation, textLayer.id, finalTranslated)
+      }
+    }
+
+    setTranslatingLayer(layer.id)
+    try {
+      if (layer.type === 'text') {
+        await translateSingleText(layer)
+      } else if (isGroupLayer(layer)) {
+        const getDescendants = (parentId: EntityId): Layer[] => {
+          const result: Layer[] = []
+          const directChildren = page.layers.filter((l) => (l.parent ?? null) === parentId)
+          for (const child of directChildren) {
+            if (child.type === 'text') {
+              result.push(child)
+            } else if (isGroupLayer(child)) {
+              result.push(...getDescendants(child.id))
+            }
+          }
+          return result
+        }
+        const textChildren = getDescendants(layer.id)
+        const settings = loadTranslationSettings()
+        if (settings.provider === 'local') {
+          for (const child of textChildren) {
+            await call(commands.setTranslation, child.id, null)
+          }
+          if (textChildren.length > 0) {
+            await call(commands.process, { scope: 'entities', value: textChildren.map((c) => c.id) }, { operation: 'only', stage: 'translation' })
+          }
+        } else {
+          for (const child of textChildren) {
+            try {
+              await translateSingleText(child)
+            } catch (childError) {
+              console.error(`Failed to translate child layer ${child.id} in folder:`, childError)
+            }
+          }
+        }
+      }
+      await refresh(projectKey, pageKey)
+    } catch (error) {
+      console.error('Translation error:', error)
+    } finally {
+      setTranslatingLayer(null)
+    }
+  }
 
   useEffect(() => {
     setExpandedLayer(selected.length === 1 ? (selected[0] ?? null) : null)
@@ -630,6 +721,8 @@ function LayersInspector() {
                 canMoveDown={!locked && position >= 0 && position < siblings.length - 1}
                 reordering={movingLayer !== null}
                 onDelete={isGroupLayer(layer) ? undefined : () => deleteLayer(layer.id)}
+                translating={translatingLayer === layer.id}
+                onTranslate={() => void translateLayer(layer)}
               />
             )
           })}
@@ -654,7 +747,11 @@ function LayerRow({
   canMoveDown,
   reordering,
   onDelete,
+  translating,
+  onTranslate,
 }: {
+  translating?: boolean
+  onTranslate?: () => void
   layer: Layer
   index: number
   depth: number
@@ -699,7 +796,7 @@ function LayerRow({
           </button>
           {!locked && (
             <div
-              className={`pointer-events-none absolute top-1/2 z-10 flex -translate-y-1/2 rounded-md bg-background/80 p-0.5 opacity-0 shadow-sm ring-1 ring-border/40 backdrop-blur-md transition-opacity duration-150 group-hover:pointer-events-auto group-hover:opacity-100 focus-within:pointer-events-auto focus-within:opacity-100 motion-reduce:transition-none ${expanded ? 'right-7' : 'right-[3.25rem]'}`}
+              className={`absolute top-1/2 z-10 flex -translate-y-1/2 items-center rounded-md bg-background/80 p-0.5 shadow-sm ring-1 ring-border/40 backdrop-blur-md transition-opacity duration-150 focus-within:pointer-events-auto focus-within:opacity-100 group-hover:pointer-events-auto group-hover:opacity-100 motion-reduce:transition-none ${expanded ? 'right-7 pointer-events-auto opacity-100' : 'right-[3.25rem] pointer-events-none opacity-0'}`}
             >
               <button
                 type='button'
@@ -719,6 +816,36 @@ function LayerRow({
               >
                 <ArrowDown className='size-3' />
               </button>
+              {(layer.type === 'text' || isGroupLayer(layer)) && (
+                <>
+                  <TranslationSettingsPopover compact />
+                  <button
+                    type='button'
+                    aria-label={
+                      isGroupLayer(layer)
+                        ? t('layers.translateFolder', { defaultValue: 'Translate all text in folder' })
+                        : t('layers.translate', { defaultValue: 'Translate text' })
+                    }
+                    title={
+                      isGroupLayer(layer)
+                        ? t('layers.translateFolder', { defaultValue: 'Translate all text in folder' })
+                        : t('layers.translate', { defaultValue: 'Translate text' })
+                    }
+                    disabled={translating}
+                    className='grid size-5 place-items-center rounded-sm text-muted-foreground hover:bg-foreground/[0.07] hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/25 disabled:pointer-events-none disabled:opacity-30'
+                    onClick={(event) => {
+                      event.stopPropagation()
+                      onTranslate?.()
+                    }}
+                  >
+                    {translating ? (
+                      <LoaderCircle className='size-3 animate-spin text-primary' />
+                    ) : (
+                      <Languages className='size-3' />
+                    )}
+                  </button>
+                </>
+              )}
             </div>
           )}
           {!expanded && (
@@ -887,7 +1014,12 @@ function LayerEditor({ layer, onDelete }: { layer: Layer; onDelete?: () => void 
               }
             />
           </InspectorField>
-          <InspectorField label={t('inspector.translation')}>
+          <div className='grid min-w-0 gap-0.5'>
+            <div className='flex items-center justify-between'>
+              <span className='text-[8px] font-medium tracking-[0.06em] text-muted-foreground uppercase'>
+                {t('inspector.translation')}
+              </span>
+            </div>
             <CommitTextarea
               data-testid={`edit-translation-${layer.id}`}
               aria-label={t('layers.translationLabel', { name })}
@@ -900,7 +1032,7 @@ function LayerEditor({ layer, onDelete }: { layer: Layer; onDelete?: () => void 
                   .catch(() => undefined)
               }
             />
-          </InspectorField>
+          </div>
         </>
       )}
     </div>

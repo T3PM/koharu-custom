@@ -140,6 +140,15 @@ impl Scheduler {
         }
         page_finished
     }
+
+    pub(crate) fn stage_finished_globally(&self, stage: Stage) -> bool {
+        self.pages.iter().all(|page| {
+            page.stages
+                .iter()
+                .find(|work| work.stage == stage)
+                .is_none_or(|work| work.state == WorkState::Finished)
+        })
+    }
 }
 
 const fn prerequisite(stage: Stage) -> Option<Stage> {
@@ -187,6 +196,28 @@ mod tests {
         assert_eq!(translation, (pages[0], Stage::Translation));
         assert!(busy.contains(&Stage::Detection));
         assert!(busy.contains(&Stage::Inpainting));
+    }
+
+    #[test]
+    fn tracks_global_stage_completion_for_vram_eviction() {
+        let pages = pages(2);
+        let stages = [Stage::Detection, Stage::Ocr];
+        let mut scheduler = Scheduler::new(&pages, &stages);
+
+        assert!(!scheduler.stage_finished_globally(Stage::Detection));
+        assert!(!scheduler.stage_finished_globally(Stage::Ocr));
+
+        scheduler.complete_stage(pages[0], Stage::Detection);
+        assert!(!scheduler.stage_finished_globally(Stage::Detection));
+
+        scheduler.complete_stage(pages[1], Stage::Detection);
+        assert!(scheduler.stage_finished_globally(Stage::Detection));
+        assert!(!scheduler.stage_finished_globally(Stage::Ocr));
+
+        scheduler.complete_stage(pages[0], Stage::Ocr);
+        assert!(!scheduler.stage_finished_globally(Stage::Ocr));
+        scheduler.complete_stage(pages[1], Stage::Ocr);
+        assert!(scheduler.stage_finished_globally(Stage::Ocr));
     }
 
     #[test]
