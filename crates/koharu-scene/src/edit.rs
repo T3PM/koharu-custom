@@ -200,6 +200,9 @@ impl Edit {
     }
 
     pub fn remove_entity(&mut self, entity: EntityId, policy: RemovePolicy) -> Result<()> {
+        if !self.state.contains_entity(entity) {
+            return Err(Error::EntityNotFound(entity));
+        }
         let page = self.state.page_for(entity)?;
         if entity != page
             && self
@@ -266,6 +269,18 @@ impl Edit {
                 Ok(())
             }
         }
+    }
+
+    pub fn remove_entity_if_present(
+        &mut self,
+        entity: EntityId,
+        policy: RemovePolicy,
+    ) -> Result<bool> {
+        if !self.state.contains_entity(entity) {
+            return Ok(false);
+        }
+        self.remove_entity(entity, policy)?;
+        Ok(true)
     }
 
     pub fn promote_entity_to_user(&mut self, entity: EntityId) -> Result<()> {
@@ -779,13 +794,17 @@ impl Edit {
                     )));
                 }
             }
-            None if value.origin().is_some() && !value.set_origin(Origin::User) => {
-                return Err(Error::Authorship(format!(
-                    "component {} reports ownership but cannot be stamped",
-                    T::KIND
-                )));
+            None => {
+                if value.origin().is_some()
+                    && !matches!(value.origin(), Some(Origin::Generated(_)))
+                    && !value.set_origin(Origin::User)
+                {
+                    return Err(Error::Authorship(format!(
+                        "component {} reports ownership but cannot be stamped",
+                        T::KIND
+                    )));
+                }
             }
-            None => {}
         }
         Ok(value)
     }

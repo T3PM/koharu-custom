@@ -11,7 +11,7 @@ use crate::{
     component::{Component, ValidationContext},
 };
 
-use super::LanguageTag;
+use super::{CharacterProfile, LanguageTag};
 
 pub const GLOSSARY_TEXT_MAX_CHARS: usize = 256;
 pub const GLOSSARY_MAX_EXAMPLES: usize = 3;
@@ -55,7 +55,7 @@ impl Component for Glossary {
     }
 }
 
-#[revisioned(revision = 1)]
+#[revisioned(revision = 3)]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
 pub struct GlossaryEntry {
     pub id: GlossaryEntryId,
@@ -69,6 +69,11 @@ pub struct GlossaryEntry {
     pub source_origin: GlossaryValueOrigin,
     pub translation_origin: Option<GlossaryValueOrigin>,
     pub present_in_last_scan: bool,
+    #[revision(start = 2)]
+    pub character: Option<CharacterProfile>,
+    #[revision(start = 3)]
+    #[serde(default)]
+    pub forbidden_variants: Vec<String>,
 }
 
 impl GlossaryEntry {
@@ -88,6 +93,25 @@ impl GlossaryEntry {
             .is_some_and(|confidence| !confidence.is_finite() || !(0.0..=1.0).contains(&confidence))
         {
             return Err(Error::invalid("glossary confidence is invalid"));
+        }
+        if let Some(character) = &self.character {
+            if character.id != self.id {
+                return Err(Error::invalid("character profile ID does not match glossary entry ID"));
+            }
+            character.validate()?;
+        }
+        if self.forbidden_variants.len() > 32 {
+            return Err(Error::invalid(
+                "glossary entry has too many forbidden variants",
+            ));
+        }
+        for variant in &self.forbidden_variants {
+            validate_text(
+                variant,
+                GLOSSARY_TEXT_MAX_CHARS,
+                false,
+                "forbidden variant",
+            )?;
         }
         Ok(())
     }
@@ -168,9 +192,34 @@ pub fn normalize_glossary_source(source: &str) -> String {
         .to_ascii_lowercase()
 }
 
-fn validate_text(value: &str, max_chars: usize, allow_empty: bool, field: &str) -> Result<()> {
+pub(crate) fn validate_text(value: &str, max_chars: usize, allow_empty: bool, field: &str) -> Result<()> {
+    validate_text_internal(value, max_chars, allow_empty, false, field)
+}
+
+pub(crate) fn validate_multiline_text(
+    value: &str,
+    max_chars: usize,
+    allow_empty: bool,
+    field: &str,
+) -> Result<()> {
+    validate_text_internal(value, max_chars, allow_empty, true, field)
+}
+
+fn validate_text_internal(
+    value: &str,
+    max_chars: usize,
+    allow_empty: bool,
+    allow_multiline: bool,
+    field: &str,
+) -> Result<()> {
     let valid_length = value.chars().count() <= max_chars;
-    let has_prohibited_control = value.chars().any(char::is_control);
+    let has_prohibited_control = value.chars().any(|ch| {
+        if allow_multiline && matches!(ch, '\n' | '\r' | '\t') {
+            false
+        } else {
+            ch.is_control()
+        }
+    });
     let empty = normalize_glossary_source(value).is_empty();
     if valid_length && !has_prohibited_control && (allow_empty || !empty) {
         Ok(())

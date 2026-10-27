@@ -5,10 +5,10 @@
 //! relation endpoints.
 
 use crate::{
-    BubbleRegion, ComponentOwner, DetectionAnalysis, EntityId, EntityOrigin, Error, Geometry,
-    Glossary, Group, OcrAnalysis, Page, Project, RasterLayer, Region, RegionSpec, Relation, Result,
-    SourceText, TextContent, TextGroup, TextLayout, TextRegion, TextRole, Translation, Typography,
-    Visibility,
+    BalloonClassification, BubbleRegion, ComponentOwner, DetectionAnalysis, EntityId,
+    EntityOrigin, Error, Geometry, Glossary, Group, OcrAnalysis, Page, Project, RasterLayer,
+    Region, RegionSpec, Relation, Result, SourceText, Speaker, TextContent, TextGroup,
+    TextLayout, TextRegion, TextRole, Translation, Typography, Visibility,
     component::{Component, ComponentRecord, ValidationContext, decode, key},
     components::Assets,
     state::{Components, State},
@@ -62,6 +62,8 @@ component_schema! {
     ASSETS = 16 => Assets,
     ENTITY_ORIGIN = 17 => EntityOrigin,
     GLOSSARY = 18 => Glossary,
+    SPEAKER = 19 => Speaker,
+    BALLOON_CLASSIFICATION = 20 => BalloonClassification,
 }
 
 pub(crate) fn validate_component_owner(kind: &str, owner: ComponentOwner) -> Result<()> {
@@ -105,6 +107,8 @@ pub(crate) fn validate_entity(state: &State, id: EntityId) -> Result<()> {
     let has_ocr = has(OCR_ANALYSIS);
     let has_group = has(GROUP);
     let has_text_group = has(TEXT_GROUP);
+    let has_speaker = has(SPEAKER);
+    let has_balloon_class = has(BALLOON_CLASSIFICATION);
     let parent = state.parent_and_position(id)?.0;
     let parent_is_text_group = parent.is_some_and(|parent| {
         state.entity(parent).is_ok_and(|entity| {
@@ -191,6 +195,14 @@ pub(crate) fn validate_entity(state: &State, id: EntityId) -> Result<()> {
     } else if (has_detection || has_ocr) && !has_region {
         Err(Error::invalid(format!(
             "entity {id} has analysis results but is not a region"
+        )))
+    } else if has_speaker && !has_layout && !has_content {
+        Err(Error::invalid(format!(
+            "entity {id} has speaker but is not a text layer or text content"
+        )))
+    } else if has_balloon_class && !has_region && !has_layout {
+        Err(Error::invalid(format!(
+            "entity {id} has balloon classification but is not a region or text layer"
         )))
     } else {
         Ok(())

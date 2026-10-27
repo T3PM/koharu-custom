@@ -6,6 +6,7 @@
 
 mod analysis;
 mod assets;
+mod character;
 mod glossary;
 mod groups;
 mod layers;
@@ -15,10 +16,13 @@ mod structure;
 mod text;
 
 pub use analysis::{
-    DetectionAnalysis, DetectionLabel, OcrAnalysis, Region, RegionKind, TextDirection,
+    BalloonClassification, BalloonShape, DetectionAnalysis, DetectionLabel, OcrAnalysis, Region,
+    RegionKind, TextDirection,
 };
 pub(crate) use assets::Assets;
 pub use assets::{Asset, AssetInput, AssetMetadata, AssetRole};
+pub use character::{CharacterGender, CharacterProfile, Speaker};
+pub(crate) use glossary::{validate_multiline_text, validate_text};
 pub use glossary::{
     GLOSSARY_EXAMPLE_MAX_CHARS, GLOSSARY_MAX_EXAMPLES, GLOSSARY_TEXT_MAX_CHARS, Glossary,
     GlossaryEntry, GlossaryEntryId, GlossaryKind, GlossaryValueOrigin, normalize_glossary_source,

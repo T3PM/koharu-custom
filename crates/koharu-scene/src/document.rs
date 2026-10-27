@@ -1,9 +1,7 @@
-//! Resolved document views and intent-level edits over the generic scene kernel.
-
 use crate::{
-    At, DetectionAnalysis, Edit, EntityId, Geometry, Group, OcrAnalysis, Origin, PageRef, Presents,
-    Region, RegionSpec, Result, Snapshot, SourceText, TextContent, TextGroup, TextLayout, TextRole,
-    Translation, Typography, Visibility,
+    At, BalloonClassification, DetectionAnalysis, Edit, EntityId, Geometry, GlossaryEntryId, Group,
+    OcrAnalysis, Origin, PageRef, Presents, Region, RegionSpec, Result, Snapshot, SourceText,
+    Speaker, TextContent, TextGroup, TextLayout, TextRole, Translation, Typography, Visibility,
 };
 
 #[derive(Copy, Clone)]
@@ -74,6 +72,19 @@ impl<'a> TextLayerRef<'a> {
         self.snapshot.component(self.id)
     }
 
+    pub fn speaker(self) -> Result<Option<Speaker>> {
+        self.snapshot.component(self.id)
+    }
+
+    pub fn balloon_classification(self) -> Result<Option<BalloonClassification>> {
+        if let Some(classification) = self.snapshot.component(self.id)? {
+            return Ok(Some(classification));
+        }
+        self.automatic_target()?
+            .and_then(|region| region.balloon_classification().transpose())
+            .transpose()
+    }
+
     pub fn content(self) -> Result<TextContentRef<'a>> {
         let relation = self
             .snapshot
@@ -140,6 +151,10 @@ impl<'a> TextContentRef<'a> {
         self.snapshot.component(self.id)
     }
 
+    pub fn speaker(self) -> Result<Option<Speaker>> {
+        self.snapshot.component(self.id)
+    }
+
     pub fn source_region(self) -> Result<Option<AnalysisRegionRef<'a>>> {
         self.snapshot
             .relation_from::<crate::RecognizedFrom>(self.id)?
@@ -173,6 +188,10 @@ impl AnalysisRegionRef<'_> {
     }
 
     pub fn ocr(self) -> Result<Option<OcrAnalysis>> {
+        self.snapshot.component(self.id)
+    }
+
+    pub fn balloon_classification(self) -> Result<Option<BalloonClassification>> {
         self.snapshot.component(self.id)
     }
 }
@@ -271,6 +290,15 @@ impl Edit {
             },
         )?;
         Ok(entity)
+    }
+
+    pub fn set_speaker(
+        &mut self,
+        entity: EntityId,
+        speaker: Option<GlossaryEntryId>,
+        origin: Origin,
+    ) -> Result<()> {
+        self.set(entity, &Speaker::new(speaker, origin))
     }
 }
 

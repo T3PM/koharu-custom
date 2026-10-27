@@ -126,11 +126,16 @@ async fn built_in_component_schema_revisions_are_explicit() {
             schema::<TextContent>(),
             schema::<crate::components::Assets>(),
             schema::<Relation>(),
+            schema::<Speaker>(),
+            schema::<BalloonClassification>(),
+            schema::<Glossary>(),
         ],
-        [1; 17]
+        [1; 20]
     );
     assert_eq!(schema::<Page>(), 2);
     assert_eq!(schema::<TextLayout>(), 2);
+    assert_eq!(<GlossaryEntry as revision::Revisioned>::revision(), 3);
+    assert_eq!(<CharacterProfile as revision::Revisioned>::revision(), 2);
 }
 
 #[tokio::test]
@@ -156,6 +161,8 @@ async fn built_in_component_kinds_express_domain_ownership() {
             DetectionAnalysis::KIND,
             OcrAnalysis::KIND,
             crate::components::Assets::KIND,
+            Speaker::KIND,
+            BalloonClassification::KIND,
         ],
         [
             "dev.koharu.project",
@@ -177,6 +184,8 @@ async fn built_in_component_kinds_express_domain_ownership() {
             "dev.koharu.analysis.detection",
             "dev.koharu.analysis.ocr",
             "dev.koharu.assets",
+            "dev.koharu.text.speaker",
+            "dev.koharu.analysis.balloon-classification",
         ]
     );
 }
@@ -1678,5 +1687,652 @@ async fn textbox_edits_preserve_inpainted_raster_layer_assets() {
 
     let bytes = after_text_edit.read_blob(preserved_asset.blob).await.unwrap();
     assert_eq!(bytes.as_ref(), b"inpainted clean plate bytes");
+}
+
+#[tokio::test]
+async fn character_profile_and_speaker_lifecycle() {
+    let mut session = Session::memory().await.unwrap();
+    let entry_id = GlossaryEntryId::new();
+    let profile = CharacterProfile {
+        id: entry_id,
+        gender: CharacterGender::Female,
+        first_person: Some("私".to_owned()),
+        second_person: Some("あなた".to_owned()),
+        tone: Some("polite".to_owned()),
+        custom_instructions: Some("Speak gently".to_owned()),
+        honorific_policy: Some("keep".to_owned()),
+    };
+    let glossary = Glossary {
+        enabled: true,
+        source_language: Some(LanguageTag::new("ja").unwrap()),
+        target_language: Some(LanguageTag::new("en").unwrap()),
+        source_fingerprint: None,
+        entries: vec![GlossaryEntry {
+            id: entry_id,
+            source: "山田".to_owned(),
+            translation: Some("Yamada".to_owned()),
+            kind: GlossaryKind::Person,
+            enabled: true,
+            confidence: Some(1.0),
+            occurrence_count: 5,
+            examples: vec![],
+            source_origin: GlossaryValueOrigin::User,
+            translation_origin: Some(GlossaryValueOrigin::User),
+            present_in_last_scan: true,
+            character: Some(profile.clone()),
+            forbidden_variants: vec!["Yama-chan".to_owned()],
+        }],
+    };
+
+    let mut text_layer = None;
+    let patch = session
+        .snapshot()
+        .patch(|edit| {
+            edit.set_project(&glossary)?;
+            let page = edit.add_page(page(), At::End)?;
+            let content = edit.add_text_content(page, At::End)?;
+            edit.set(content, &source("こんにちは"))?;
+            let layer = edit.add_text_layer(
+                page,
+                At::End,
+                content,
+                &TextLayout {
+                    origin: Origin::User,
+                    kind: TextLayoutKind::Paragraph,
+                    angle_degrees: None,
+                },
+            )?;
+            edit.set_speaker(layer, Some(entry_id), Origin::User)?;
+            text_layer = Some(layer);
+            Ok(())
+        })
+        .unwrap();
+
+    let snapshot = session.commit(patch).await.unwrap().snapshot;
+    let project_glossary = snapshot
+        .project_component::<Glossary>()
+        .unwrap()
+        .expect("glossary must exist");
+    assert_eq!(project_glossary.entries.len(), 1);
+    assert_eq!(
+        project_glossary.entries[0].character.as_ref().unwrap().gender,
+        CharacterGender::Female
+    );
+
+    let layer_ref = snapshot.text_layer(text_layer.unwrap()).unwrap();
+    assert_eq!(layer_ref.speaker().unwrap().and_then(|s| s.speaker), Some(entry_id));
+
+    let page_id = snapshot.pages().next().unwrap().id();
+    let producer = ProducerId::new("dev.koharu.pipeline.detection").unwrap();
+    let generation = Generation::new(producer);
+    let mut edit = snapshot.edit_as(generation);
+    let bubble = edit.add_analysis_region::<BubbleRegion>(
+        page_id,
+        At::End,
+        &Geometry {
+            origin: Origin::User,
+            points: vec![
+                Point { x: 0.0, y: 0.0 },
+                Point { x: 100.0, y: 0.0 },
+                Point { x: 100.0, y: 100.0 },
+                Point { x: 0.0, y: 100.0 },
+            ],
+        },
+        Some("bubble".to_owned()),
+    ).unwrap();
+    edit.set(
+        bubble,
+        &BalloonClassification {
+            origin: Origin::User,
+            shape: BalloonShape::Shout,
+            confidence: 0.95,
+        },
+    ).unwrap();
+    let pipeline_patch = edit.finish().unwrap();
+
+    let committed_snapshot = session.commit(pipeline_patch).await.unwrap().snapshot;
+    let bubble_ref = committed_snapshot.analysis_region(bubble).unwrap();
+    assert_eq!(
+        bubble_ref.balloon_classification().unwrap().unwrap().shape,
+        BalloonShape::Shout
+    );
+}
+
+
+#[tokio::test]
+async fn remove_entity_returns_entity_not_found_on_missing_entity() {
+    let session = Session::memory().await.unwrap();
+    let missing_id = EntityId::new();
+
+    let result = session
+        .snapshot()
+        .patch(|edit| edit.remove_entity(missing_id, RemovePolicy::Cascade));
+
+    match result {
+        Err(Error::EntityNotFound(id)) => assert_eq!(id, missing_id),
+        other => panic!("expected Error::EntityNotFound({missing_id:?}), got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn remove_entity_called_twice_fails_on_second_invocation() {
+    let mut session = Session::memory().await.unwrap();
+    let mut entity_id = None;
+
+    let setup = session
+        .snapshot()
+        .patch(|edit| {
+            let page = edit.add_page(page(), At::End)?;
+            let entity = edit.add_text_content(page, At::End)?;
+            entity_id = Some(entity);
+            Ok(())
+        })
+        .unwrap();
+    session.commit(setup).await.unwrap();
+    let entity = entity_id.unwrap();
+
+    let result = session.snapshot().patch(|edit| {
+        edit.remove_entity(entity, RemovePolicy::Cascade)?;
+        edit.remove_entity(entity, RemovePolicy::Cascade)?;
+        Ok(())
+    });
+
+    match result {
+        Err(Error::EntityNotFound(id)) => assert_eq!(id, entity),
+        other => panic!("expected Error::EntityNotFound({entity:?}), got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn remove_entity_if_present_safely_handles_missing_and_existing_entities() {
+    let mut session = Session::memory().await.unwrap();
+    let mut entity_id = None;
+
+    let setup = session
+        .snapshot()
+        .patch(|edit| {
+            let page = edit.add_page(page(), At::End)?;
+            let entity = edit.add_text_content(page, At::End)?;
+            entity_id = Some(entity);
+            Ok(())
+        })
+        .unwrap();
+    session.commit(setup).await.unwrap();
+    let entity = entity_id.unwrap();
+    let missing_id = EntityId::new();
+
+    let patch = session
+        .snapshot()
+        .patch(|edit| {
+            let missing_result = edit.remove_entity_if_present(missing_id, RemovePolicy::Cascade)?;
+            assert!(!missing_result, "missing entity removal must return false");
+
+            let existing_result = edit.remove_entity_if_present(entity, RemovePolicy::Cascade)?;
+            assert!(existing_result, "existing entity removal must return true");
+
+            let duplicate_result = edit.remove_entity_if_present(entity, RemovePolicy::Cascade)?;
+            assert!(!duplicate_result, "subsequent removal must return false");
+
+            Ok(())
+        })
+        .unwrap();
+
+    let committed = session.commit(patch).await.unwrap();
+    assert!(committed.snapshot.entity(entity).is_err());
+}
+
+#[tokio::test]
+async fn prune_missing_drops_deleted_entity_operations_and_rebases() {
+    let mut session = Session::memory().await.unwrap();
+    let mut layer_a = None;
+    let mut layer_b = None;
+    let setup = session
+        .snapshot()
+        .patch(|edit| {
+            let page = edit.add_page(page(), At::End)?;
+            let content_a = edit.add_text_content(page, At::End)?;
+            edit.set(content_a, &SourceText {
+                text: Authored::user("Source A".to_owned()),
+                language: None,
+            })?;
+            let a = edit.add_text_layer(page, At::End, content_a, &TextLayout {
+                origin: Origin::User,
+                kind: TextLayoutKind::Paragraph,
+                angle_degrees: None,
+            })?;
+            layer_a = Some((content_a, a));
+
+            let content_b = edit.add_text_content(page, At::End)?;
+            edit.set(content_b, &SourceText {
+                text: Authored::user("Source B".to_owned()),
+                language: None,
+            })?;
+            let b = edit.add_text_layer(page, At::End, content_b, &TextLayout {
+                origin: Origin::User,
+                kind: TextLayoutKind::Paragraph,
+                angle_degrees: None,
+            })?;
+            layer_b = Some((content_b, b));
+            Ok(())
+        })
+        .unwrap();
+    session.commit(setup).await.unwrap();
+
+    let (content_a, layer_a) = layer_a.unwrap();
+    let (content_b, _layer_b) = layer_b.unwrap();
+
+    let base_snap = session.snapshot();
+    let modify_both = base_snap
+        .patch(|edit| {
+            edit.observe::<Translation>(content_a)?;
+            edit.observe::<Translation>(content_b)?;
+            edit.set(
+                content_a,
+                &Translation {
+                    text: Authored::user("Trans A".to_owned()),
+                    language: None,
+                },
+            )?;
+            edit.set(
+                content_b,
+                &Translation {
+                    text: Authored::user("Trans B".to_owned()),
+                    language: None,
+                },
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+    let delete_a = session
+        .snapshot()
+        .patch(|edit| {
+            edit.remove_entity(layer_a, RemovePolicy::Cascade)?;
+            edit.remove_entity(content_a, RemovePolicy::Cascade)?;
+            Ok(())
+        })
+        .unwrap();
+    session.commit(delete_a).await.unwrap();
+
+    let current = session.snapshot();
+    assert!(modify_both.rebase_on(&current).is_err());
+
+    let pruned = modify_both.prune_missing(&current);
+    assert!(!pruned.is_empty());
+    let rebased = pruned.rebase_on(&current).unwrap();
+    let committed = session.commit(rebased).await.unwrap();
+    assert_eq!(
+        committed.snapshot.text_content(content_b).unwrap().translation().unwrap().unwrap().text.value,
+        "Trans B"
+    );
+}
+
+#[test]
+fn schema_1_glossary_entry_binary_decodes_to_schema_2_with_none_character() {
+    const SCHEMA_1_ENTRY_BYTES: &[u8] = &[
+        // Revision header: 1
+        0x01,
+        // id: GlossaryEntryId (revision header: 1, followed by 16-byte Uuid 00000000-0000-0000-0000-000000000001)
+        0x01,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+        // source: "山田" (len = 6, UTF-8 bytes)
+        0x06, 0xe5, 0xb1, 0xb1, 0xe7, 0x94, 0xb0,
+        // translation: Some("Yamada") (tag = 1, len = 6, ASCII bytes)
+        0x01, 0x06, 0x59, 0x61, 0x6d, 0x61, 0x64, 0x61,
+        // kind: GlossaryKind::Person (revision: 1, variant: 0)
+        0x01, 0x00,
+        // enabled: true
+        0x01,
+        // confidence: Some(1.0f32) (tag = 1, 4 bytes LE)
+        0x01, 0x00, 0x00, 0x80, 0x3f,
+        // occurrence_count: 5
+        0x05,
+        // examples: vec![] (len = 0)
+        0x00,
+        // source_origin: GlossaryValueOrigin::User (revision: 1, variant: 2)
+        0x01, 0x02,
+        // translation_origin: Some(GlossaryValueOrigin::User) (tag = 1, revision: 1, variant: 2)
+        0x01, 0x01, 0x02,
+        // present_in_last_scan: true
+        0x01,
+    ];
+
+    let entry: GlossaryEntry = revision::from_slice(SCHEMA_1_ENTRY_BYTES)
+        .expect("schema-1 GlossaryEntry bytes must decode cleanly into schema-2 struct");
+
+    assert_eq!(entry.id.as_uuid(), uuid::Uuid::from_u128(1));
+    assert_eq!(entry.source, "山田");
+    assert_eq!(entry.translation.as_deref(), Some("Yamada"));
+    assert_eq!(entry.kind, GlossaryKind::Person);
+    assert!(entry.enabled);
+    assert_eq!(entry.confidence, Some(1.0));
+    assert_eq!(entry.occurrence_count, 5);
+    assert!(entry.examples.is_empty());
+    assert_eq!(entry.source_origin, GlossaryValueOrigin::User);
+    assert_eq!(entry.translation_origin, Some(GlossaryValueOrigin::User));
+    assert!(entry.present_in_last_scan);
+    assert_eq!(entry.character, None);
+}
+
+#[tokio::test]
+async fn revision_one_persisted_project_glossary_upgrades_losslessly() {
+    #[revisioned(revision = 1)]
+    #[derive(Clone, Debug, PartialEq)]
+    struct GlossaryEntryV1 {
+        pub id: GlossaryEntryId,
+        pub source: String,
+        pub translation: Option<String>,
+        pub kind: GlossaryKind,
+        pub enabled: bool,
+        pub confidence: Option<f32>,
+        pub occurrence_count: u32,
+        pub examples: Vec<String>,
+        pub source_origin: GlossaryValueOrigin,
+        pub translation_origin: Option<GlossaryValueOrigin>,
+        pub present_in_last_scan: bool,
+    }
+
+    #[revisioned(revision = 1)]
+    #[derive(Clone, Debug, PartialEq)]
+    struct GlossaryV1 {
+        pub enabled: bool,
+        pub source_language: Option<LanguageTag>,
+        pub target_language: Option<LanguageTag>,
+        pub source_fingerprint: Option<String>,
+        pub entries: Vec<GlossaryEntryV1>,
+    }
+
+    impl Component for GlossaryV1 {
+        const KIND: &'static str = Glossary::KIND;
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("v1_glossary_project.khrproj");
+    let entry_id = GlossaryEntryId::new();
+
+    {
+        let mut session = Session::create(&path).await.unwrap();
+        let v1_glossary = GlossaryV1 {
+            enabled: true,
+            source_language: Some(LanguageTag::new("ja").unwrap()),
+            target_language: Some(LanguageTag::new("en").unwrap()),
+            source_fingerprint: None,
+            entries: vec![GlossaryEntryV1 {
+                id: entry_id,
+                source: "魔法少女".to_owned(),
+                translation: Some("Magical Girl".to_owned()),
+                kind: GlossaryKind::Term,
+                enabled: true,
+                confidence: Some(0.95),
+                occurrence_count: 12,
+                examples: vec!["魔法少女になる".to_owned()],
+                source_origin: GlossaryValueOrigin::User,
+                translation_origin: Some(GlossaryValueOrigin::User),
+                present_in_last_scan: true,
+            }],
+        };
+
+        let patch = session
+            .snapshot()
+            .patch(|edit| edit.set_project(&v1_glossary))
+            .unwrap();
+        session.commit(patch).await.unwrap();
+    }
+
+    {
+        let session = Session::open(&path).await.unwrap();
+        let glossary = session
+            .snapshot()
+            .project_component::<Glossary>()
+            .unwrap()
+            .expect("glossary component must exist");
+
+        assert!(glossary.enabled);
+        assert_eq!(glossary.source_language.as_ref().map(|l| l.as_str()), Some("ja"));
+        assert_eq!(glossary.target_language.as_ref().map(|l| l.as_str()), Some("en"));
+        assert_eq!(glossary.entries.len(), 1);
+
+        let entry = &glossary.entries[0];
+        assert_eq!(entry.id, entry_id);
+        assert_eq!(entry.source, "魔法少女");
+        assert_eq!(entry.translation.as_deref(), Some("Magical Girl"));
+        assert_eq!(entry.kind, GlossaryKind::Term);
+        assert_eq!(entry.character, None);
+    }
+}
+
+#[tokio::test]
+async fn prune_missing_preserves_same_patch_group_layer_and_relation() {
+    let mut session = Session::memory().await.unwrap();
+
+    let mut page_id = None;
+    let mut content_id = None;
+    let setup = session
+        .snapshot()
+        .patch(|edit| {
+            let p = edit.add_page(page(), At::End)?;
+            let content = edit.add_text_content(p, At::End)?;
+            edit.set(
+                content,
+                &SourceText {
+                    text: Authored::user("セリフ".to_owned()),
+                    language: Some(LanguageTag::new("ja")?),
+                },
+            )?;
+            page_id = Some(p);
+            content_id = Some(content);
+            Ok(())
+        })
+        .unwrap();
+    let base_snapshot = session.commit(setup).await.unwrap().snapshot;
+    let page = page_id.unwrap();
+    let content = content_id.unwrap();
+
+    assert!(base_snapshot.page(page).unwrap().text_group().unwrap().is_none());
+
+    let mut layer_id = None;
+    let patch = base_snapshot
+        .patch(|edit| {
+            let layer = edit.add_text_layer(
+                page,
+                At::End,
+                content,
+                &TextLayout {
+                    origin: Origin::User,
+                    kind: TextLayoutKind::Paragraph,
+                    angle_degrees: None,
+                },
+            )?;
+            layer_id = Some(layer);
+            Ok(())
+        })
+        .unwrap();
+    let layer = layer_id.unwrap();
+
+    let (pruned, diagnostics) = patch.prune_missing_with_diagnostics(&base_snapshot);
+    assert!(
+        diagnostics.is_empty(),
+        "prune_missing must not drop same-patch dependent operations: {diagnostics:?}"
+    );
+    assert_eq!(pruned.operations.len(), patch.operations.len());
+
+    let committed_snapshot = session.commit(pruned).await.unwrap().snapshot;
+
+    let page_ref = committed_snapshot.page(page).unwrap();
+    let text_group = page_ref.text_group().unwrap().expect("text group must exist");
+    assert!(committed_snapshot.component::<TextGroup>(text_group.id()).unwrap().is_some());
+
+    let layer_ref = committed_snapshot.text_layer(layer).expect("text layer must exist");
+    assert_eq!(layer_ref.layout().unwrap().kind, TextLayoutKind::Paragraph);
+
+    let presents_relations = committed_snapshot
+        .relations_from_as::<Presents>(layer)
+        .collect::<Vec<_>>();
+    assert_eq!(presents_relations.len(), 1);
+    assert_eq!(presents_relations[0].value().target, content);
+}
+
+#[tokio::test]
+async fn prune_missing_prunes_entire_chain_if_root_page_is_deleted() {
+    let mut session = Session::memory().await.unwrap();
+
+    let mut page_id = None;
+    let mut content_id = None;
+    let setup = session
+        .snapshot()
+        .patch(|edit| {
+            let p = edit.add_page(page(), At::End)?;
+            let content = edit.add_text_content(p, At::End)?;
+            page_id = Some(p);
+            content_id = Some(content);
+            Ok(())
+        })
+        .unwrap();
+    let base = session.commit(setup).await.unwrap().snapshot;
+    let page = page_id.unwrap();
+    let content = content_id.unwrap();
+
+    let patch_a = base
+        .patch(|edit| {
+            edit.add_text_layer(
+                page,
+                At::End,
+                content,
+                &TextLayout {
+                    origin: Origin::User,
+                    kind: TextLayoutKind::Paragraph,
+                    angle_degrees: None,
+                },
+            )?;
+            Ok(())
+        })
+        .unwrap();
+
+    let patch_b = base
+        .patch(|edit| edit.remove_entity(page, RemovePolicy::Cascade))
+        .unwrap();
+    let state_b = session.commit(patch_b).await.unwrap().snapshot;
+
+    let (pruned_a, diagnostics) = patch_a.prune_missing_with_diagnostics(&state_b);
+    assert!(!diagnostics.is_empty(), "expected diagnostics when root page deleted");
+    assert_eq!(
+        pruned_a.operations.len(),
+        0,
+        "all operations must be pruned when root page was deleted"
+    );
+}
+
+#[tokio::test]
+async fn speaker_origin_provenance_is_preserved() {
+    let mut session = Session::memory().await.unwrap();
+    let entry_id = GlossaryEntryId::new();
+    let mut layer_id = None;
+
+    let setup = session
+        .snapshot()
+        .patch(|edit| {
+            let p = edit.add_page(page(), At::End)?;
+            let content = edit.add_text_content(p, At::End)?;
+            let layer = edit.add_text_layer(
+                p,
+                At::End,
+                content,
+                &TextLayout {
+                    origin: Origin::User,
+                    kind: TextLayoutKind::Paragraph,
+                    angle_degrees: None,
+                },
+            )?;
+            layer_id = Some(layer);
+            Ok(())
+        })
+        .unwrap();
+    let committed = session.commit(setup).await.unwrap();
+    let layer = layer_id.unwrap();
+
+    let speaker_gen = Generation::new(ProducerId::new("dev.koharu.test.speaker").unwrap());
+    let patch = committed
+        .snapshot
+        .patch(|edit| edit.set_speaker(layer, Some(entry_id), Origin::Generated(speaker_gen.clone())))
+        .unwrap();
+    let snap = session.commit(patch).await.unwrap().snapshot;
+    let speaker = snap.component::<Speaker>(layer).unwrap().unwrap();
+    assert_eq!(speaker.speaker, Some(entry_id));
+    assert_eq!(speaker.origin, Origin::Generated(speaker_gen));
+
+    let patch = snap
+        .patch(|edit| edit.set_speaker(layer, Some(entry_id), Origin::User))
+        .unwrap();
+    let snap = session.commit(patch).await.unwrap().snapshot;
+    let speaker = snap.component::<Speaker>(layer).unwrap().unwrap();
+    assert_eq!(speaker.speaker, Some(entry_id));
+    assert_eq!(speaker.origin, Origin::User);
+}
+
+#[test]
+fn glossary_entry_rev2_and_character_profile_rev1_decode_with_defaults() {
+    #[revision::revisioned(revision = 1)]
+    #[derive(Clone, Debug, PartialEq)]
+    struct CharacterProfileV1 {
+        id: GlossaryEntryId,
+        gender: CharacterGender,
+        first_person: Option<String>,
+        second_person: Option<String>,
+        tone: Option<String>,
+        custom_instructions: Option<String>,
+    }
+
+    #[revision::revisioned(revision = 2)]
+    #[derive(Clone, Debug, PartialEq)]
+    struct GlossaryEntryV2 {
+        id: GlossaryEntryId,
+        source: String,
+        translation: Option<String>,
+        kind: GlossaryKind,
+        enabled: bool,
+        confidence: Option<f32>,
+        occurrence_count: u32,
+        examples: Vec<String>,
+        source_origin: GlossaryValueOrigin,
+        translation_origin: Option<GlossaryValueOrigin>,
+        present_in_last_scan: bool,
+        #[revision(start = 2)]
+        character: Option<CharacterProfileV1>,
+    }
+
+    let id = GlossaryEntryId::new();
+    let legacy = GlossaryEntryV2 {
+        id,
+        source: "春香".to_owned(),
+        translation: Some("Haruka".to_owned()),
+        kind: GlossaryKind::Person,
+        enabled: true,
+        confidence: Some(0.95),
+        occurrence_count: 3,
+        examples: vec!["春香さん".to_owned()],
+        source_origin: GlossaryValueOrigin::Detected,
+        translation_origin: Some(GlossaryValueOrigin::User),
+        present_in_last_scan: true,
+        character: Some(CharacterProfileV1 {
+            id,
+            gender: CharacterGender::Female,
+            first_person: Some("私".to_owned()),
+            second_person: None,
+            tone: None,
+            custom_instructions: None,
+        }),
+    };
+
+
+    let bytes = revision::to_vec(&legacy).unwrap();
+    let decoded =
+        revision::from_slice::<GlossaryEntry>(&bytes)
+            .unwrap();
+    assert!(decoded.forbidden_variants.is_empty());
+    assert_eq!(
+        decoded.character.as_ref().and_then(|c| c.honorific_policy.clone()),
+        None
+    );
 }
 

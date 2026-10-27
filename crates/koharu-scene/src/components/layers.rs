@@ -130,6 +130,49 @@ pub struct Typography {
     pub extensions: BTreeMap<String, String>,
 }
 
+impl Typography {
+    pub const OUTER_STROKE_COLOR_KEY: &'static str = "dev.koharu.text.outer-stroke-color";
+    pub const OUTER_STROKE_WIDTH_KEY: &'static str = "dev.koharu.text.outer-stroke-width";
+
+    #[must_use]
+    pub fn outer_stroke(&self) -> Option<([u8; 4], f32)> {
+        let width: f32 = self
+            .extensions
+            .get(Self::OUTER_STROKE_WIDTH_KEY)?
+            .parse()
+            .ok()?;
+        if !width.is_finite() || width <= 0.0 {
+            return None;
+        }
+        let raw_color = self.extensions.get(Self::OUTER_STROKE_COLOR_KEY)?;
+        let parts: Vec<u8> = raw_color
+            .split(',')
+            .map(|part| part.trim().parse::<u8>().ok())
+            .collect::<Option<Vec<u8>>>()?;
+        let [r, g, b, a]: [u8; 4] = parts.try_into().ok()?;
+        Some(([r, g, b, a], width))
+    }
+
+    pub fn set_outer_stroke(&mut self, stroke: Option<([u8; 4], f32)>) {
+        match stroke {
+            Some(([r, g, b, a], width)) if width.is_finite() && width > 0.0 => {
+                self.extensions.insert(
+                    Self::OUTER_STROKE_COLOR_KEY.to_owned(),
+                    format!("{r},{g},{b},{a}"),
+                );
+                self.extensions.insert(
+                    Self::OUTER_STROKE_WIDTH_KEY.to_owned(),
+                    format!("{width}"),
+                );
+            }
+            _ => {
+                self.extensions.remove(Self::OUTER_STROKE_COLOR_KEY);
+                self.extensions.remove(Self::OUTER_STROKE_WIDTH_KEY);
+            }
+        }
+    }
+}
+
 impl Component for Typography {
     const KIND: &'static str = "dev.koharu.text.typography";
 

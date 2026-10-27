@@ -168,3 +168,44 @@ impl Component for DetectionAnalysis {
         true
     }
 }
+
+#[revisioned(revision = 1)]
+#[derive(Copy, Clone, Debug, Default, Eq, Hash, PartialEq, Serialize, Deserialize, Type)]
+#[serde(rename_all = "snake_case")]
+pub enum BalloonShape {
+    #[default]
+    NormalSpeech,
+    Shout,
+    Thought,
+    Whisper,
+    Narration,
+}
+
+#[revisioned(revision = 1)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Type)]
+pub struct BalloonClassification {
+    pub origin: Origin,
+    pub shape: BalloonShape,
+    pub confidence: f32,
+}
+
+impl Component for BalloonClassification {
+    const KIND: &'static str = "dev.koharu.analysis.balloon-classification";
+
+    fn validate(&self, _context: &ValidationContext<'_>) -> Result<()> {
+        self.origin.validate()?;
+        if !self.confidence.is_finite() || !(0.0..=1.0).contains(&self.confidence) {
+            return Err(Error::invalid("balloon classification confidence is invalid"));
+        }
+        Ok(())
+    }
+
+    fn origin(&self) -> Option<&Origin> {
+        Some(&self.origin)
+    }
+
+    fn set_origin(&mut self, origin: Origin) -> bool {
+        self.origin = origin;
+        true
+    }
+}

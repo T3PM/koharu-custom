@@ -181,13 +181,16 @@ impl Operation {
                 value,
                 components,
             } => {
-                state.insert_relation(*id, value.clone())?;
+                let mut decoded = Vec::with_capacity(components.len());
                 for entry in components {
-                    state.set_relation_component(
-                        *id,
+                    decoded.push((
                         entry.key.clone(),
                         crate::component::ComponentRecord::from_stored(entry.value.clone())?,
-                    )?;
+                    ));
+                }
+                state.insert_relation(*id, value.clone())?;
+                for (key, record) in decoded {
+                    state.set_relation_component(*id, key, record)?;
                 }
                 Ok(())
             }
@@ -400,6 +403,14 @@ struct PatchIdentity {
     label: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub enum PruneDiagnostic {
+    MissingEntity { operation_index: usize, entity: EntityId },
+    MissingRelation { operation_index: usize, relation: RelationId },
+    MissingPage { operation_index: usize, page: EntityId },
+    ApplyFailed { operation_index: usize, error: String },
+}
+
 #[derive(Clone, Debug)]
 pub struct Patch {
     pub(crate) project: koharu_storage::DocumentId,
@@ -497,6 +508,206 @@ impl Patch {
             self.attachments.to_vec(),
             self.label.clone(),
         )
+    }
+
+    #[must_use]
+    pub fn prune_missing(&self, snapshot: &Snapshot) -> Self {
+        self.prune_missing_with_diagnostics(snapshot).0
+    }
+
+    #[must_use]
+    pub fn prune_missing_with_diagnostics(
+        &self,
+        snapshot: &Snapshot,
+    ) -> (Self, Vec<PruneDiagnostic>) {
+        let state = &snapshot.state;
+        let observations = self
+            .observations
+            .iter()
+            .filter(|obs| match obs {
+                Observation::ProjectHierarchy { .. } => true,
+                Observation::Page { page, .. } => state.pages.contains_key(page),
+                Observation::Children { parent, .. } => state.contains_entity(*parent),
+                Observation::Component { owner, .. } => match owner {
+                    ComponentOwner::Project => true,
+                    ComponentOwner::Entity(id) => state.contains_entity(*id),
+                    ComponentOwner::Relation(id) => state.relations.contains_key(id),
+                },
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+
+        let mut next_state = State::clone(snapshot.state.as_ref());
+        let mut operations = Vec::with_capacity(self.operations.len());
+        let mut diagnostics = Vec::new();
+
+        for (index, op) in self.operations.iter().enumerate() {
+            let missing_reason = match op {
+                Operation::InsertPage { .. } => None,
+                Operation::RemovePage { id, .. } | Operation::MovePage { id, .. } => {
+                    if !next_state.pages.contains_key(id) {
+                        Some(PruneDiagnostic::MissingPage {
+                            operation_index: index,
+                            page: *id,
+                        })
+                    } else {
+                        None
+                    }
+                }
+                Operation::InsertEntity { page, parent, .. } => {
+                    if !next_state.contains_entity(*page) {
+                        Some(PruneDiagnostic::MissingEntity {
+                            operation_index: index,
+                            entity: *page,
+                        })
+                    } else if !next_state.contains_entity(*parent) {
+                        Some(PruneDiagnostic::MissingEntity {
+                            operation_index: index,
+                            entity: *parent,
+                        })
+                    } else {
+                        None
+                    }
+                }
+                Operation::RemoveEntity { id, .. } => {
+                    if !next_state.contains_entity(*id) {
+                        Some(PruneDiagnostic::MissingEntity {
+                            operation_index: index,
+                            entity: *id,
+                        })
+                    } else {
+                        None
+                    }
+                }
+                Operation::MoveEntity {
+                    id,
+                    before_page,
+                    before_parent,
+                    after_page,
+                    after_parent,
+                    ..
+                } => {
+                    if !next_state.contains_entity(*id) {
+                        Some(PruneDiagnostic::MissingEntity {
+                            operation_index: index,
+                            entity: *id,
+                        })
+                    } else if !next_state.contains_entity(*before_page) {
+                        Some(PruneDiagnostic::MissingEntity {
+                            operation_index: index,
+                            entity: *before_page,
+                        })
+                    } else if !next_state.contains_entity(*before_parent) {
+                        Some(PruneDiagnostic::MissingEntity {
+                            operation_index: index,
+                            entity: *before_parent,
+                        })
+                    } else if !next_state.contains_entity(*after_page) {
+                        Some(PruneDiagnostic::MissingEntity {
+                            operation_index: index,
+                            entity: *after_page,
+                        })
+                    } else if !next_state.contains_entity(*after_parent) {
+                        Some(PruneDiagnostic::MissingEntity {
+                            operation_index: index,
+                            entity: *after_parent,
+                        })
+                    } else {
+                        None
+                    }
+                }
+                Operation::ReplaceComponent { owner, .. } => match owner {
+                    ComponentOwner::Project => None,
+                    ComponentOwner::Entity(id) => {
+                        if !next_state.contains_entity(*id) {
+                            Some(PruneDiagnostic::MissingEntity {
+                                operation_index: index,
+                                entity: *id,
+                            })
+                        } else {
+                            None
+                        }
+                    }
+                    ComponentOwner::Relation(id) => {
+                        if !next_state.relations.contains_key(id) {
+                            Some(PruneDiagnostic::MissingRelation {
+                                operation_index: index,
+                                relation: *id,
+                            })
+                        } else {
+                            None
+                        }
+                    }
+                },
+                Operation::InsertRelation { value, .. } => {
+                    if !next_state.contains_entity(value.source) {
+                        Some(PruneDiagnostic::MissingEntity {
+                            operation_index: index,
+                            entity: value.source,
+                        })
+                    } else if !next_state.contains_entity(value.target) {
+                        Some(PruneDiagnostic::MissingEntity {
+                            operation_index: index,
+                            entity: value.target,
+                        })
+                    } else {
+                        None
+                    }
+                }
+                Operation::RemoveRelation { id, .. } | Operation::ReplaceRelation { id, .. } => {
+                    if !next_state.relations.contains_key(id) {
+                        Some(PruneDiagnostic::MissingRelation {
+                            operation_index: index,
+                            relation: *id,
+                        })
+                    } else {
+                        None
+                    }
+                }
+            };
+
+            if let Some(diagnostic) = missing_reason {
+                diagnostics.push(diagnostic);
+                continue;
+            }
+
+            let mut candidate_state = next_state.clone();
+            match op.apply(&mut candidate_state) {
+                Ok(()) => {
+                    next_state = candidate_state;
+                    operations.push(op.clone());
+                }
+                Err(error) => {
+                    diagnostics.push(PruneDiagnostic::ApplyFailed {
+                        operation_index: index,
+                        error: error.to_string(),
+                    });
+                }
+            }
+        }
+
+        if let Err(error) = next_state.validate() {
+            diagnostics.push(PruneDiagnostic::ApplyFailed {
+                operation_index: self.operations.len(),
+                error: error.to_string(),
+            });
+            next_state = (*snapshot.state).clone();
+            operations.clear();
+        }
+
+        let mut patch = Self {
+            project: snapshot.state.document,
+            base_revision: snapshot.state.revision,
+            base_state: snapshot.state.clone(),
+            state: Arc::new(next_state),
+            observations: Arc::from(observations),
+            operations: Arc::from(operations),
+            attachments: self.attachments.clone(),
+            label: self.label.clone(),
+            fingerprint: self.fingerprint,
+        };
+        patch.rehash();
+        (patch, diagnostics)
     }
 
     fn rehash(&mut self) {
