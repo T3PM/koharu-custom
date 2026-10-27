@@ -12,6 +12,8 @@ import { useEffect, useRef } from 'react'
 
 import { commands } from '@koharu/bridge/protocol'
 import type {
+  BalloonShape,
+  CharacterProfile,
   FontFamily,
   GlossaryEntryDraft,
   GlossaryEntryPatch,
@@ -118,8 +120,12 @@ export function useCommand<Args extends unknown[], Result>(
 }
 
 export function useImportPages() {
-  const { run, busy } = useCommand(['import-pages'], (source: Parameters<typeof commands.import>[0], chapter: string | null = null) => commands.import(source, chapter), 'navigator.importing', () =>
-    refresh(projectKey, pagesKey, pageKey),
+  const { run, busy } = useCommand(
+    ['import-pages'],
+    (source: Parameters<typeof commands.import>[0], chapter: string | null = null) =>
+      commands.import(source, chapter),
+    'navigator.importing',
+    () => refresh(projectKey, pagesKey, pageKey),
   )
   return { importPages: run, importing: busy }
 }
@@ -162,6 +168,7 @@ async function updateGlossaryCaches(
   scope: { current: GlossaryScope },
   captured: GlossaryScope | undefined,
   view?: GlossaryView,
+  options: { invalidateGlossary?: boolean } = {},
 ): Promise<void> {
   if (!glossaryScopeIsCurrent(scope, captured)) return
   const key = glossaryKey(captured.projectName)
@@ -169,10 +176,11 @@ async function updateGlossaryCaches(
     const project = queryClient.getQueryData<ProjectInfo | null>(projectKey)
     if (!project || view.revision >= project.revision) queryClient.setQueryData(key, view)
   }
-  await Promise.all([
-    queryClient.invalidateQueries({ queryKey: projectKey, exact: true }),
-    queryClient.invalidateQueries({ queryKey: key, exact: true }),
-  ])
+  const invalidations = [queryClient.invalidateQueries({ queryKey: projectKey, exact: true })]
+  if (options.invalidateGlossary !== false) {
+    invalidations.push(queryClient.invalidateQueries({ queryKey: key, exact: true }))
+  }
+  await Promise.all(invalidations)
 }
 
 async function recoverGlossaryMutation(
@@ -195,7 +203,8 @@ export function useScanGlossary(projectName: string | undefined) {
     mutationFn: () => commands.scanGlossary(),
     meta: { activity: 'glossary.scanning' },
     onMutate: () => captureGlossaryScope(scope),
-    onSuccess: (_, __, captured) => updateGlossaryCaches(scope, captured),
+    onSuccess: (result, _, captured) =>
+      updateGlossaryCaches(scope, captured, result.glossary, { invalidateGlossary: false }),
     onError: (error, _, captured) => recoverGlossaryMutation(scope, captured, error),
   })
 }
@@ -297,6 +306,19 @@ export function useTranslateGlossaryEntries(projectName: string | undefined) {
   })
 }
 
+export function useClassifyGlossaryEntries(projectName: string | undefined) {
+  const scope = useGlossaryScope(projectName)
+  return useMutation({
+    mutationKey: ['glossary', projectName, 'classify'],
+    mutationFn: ({ revision, ids }: { revision: number; ids: string[] | null }) =>
+      commands.classifyGlossaryEntries(revision, ids),
+    meta: { activity: 'glossary.classifying' },
+    onMutate: () => captureGlossaryScope(scope),
+    onSuccess: (_, __, captured) => updateGlossaryCaches(scope, captured),
+    onError: (error, _, captured) => recoverGlossaryMutation(scope, captured, error),
+  })
+}
+
 export function usePreviewGlossaryImport(projectName: string | undefined) {
   return useMutation({
     mutationKey: ['glossary', projectName, 'import-preview'],
@@ -333,6 +355,81 @@ export function useExportGlossary(projectName: string | undefined) {
     meta: { activity: 'glossary.exporting' },
     onMutate: () => captureGlossaryScope(scope),
     onError: (error, _, captured) => recoverGlossaryMutation(scope, captured, error),
+  })
+}
+
+export function useUpdateCharacterProfile(projectName: string | undefined) {
+  const scope = useGlossaryScope(projectName)
+  return useMutation({
+    mutationKey: ['glossary', projectName, 'character-profile'],
+    mutationFn: ({
+      revision,
+      entryId,
+      profile,
+    }: {
+      revision: number
+      entryId: string
+      profile: CharacterProfile | null
+    }) => commands.updateCharacterProfile(revision, entryId, profile),
+    onMutate: () => captureGlossaryScope(scope),
+    onSuccess: (view, _, captured) => updateGlossaryCaches(scope, captured, view),
+    onError: (error, _, captured) => recoverGlossaryMutation(scope, captured, error),
+  })
+}
+
+export function useSetBubbleSpeaker() {
+  return useMutation({
+    mutationFn: ({
+      revision,
+      layer,
+      speaker,
+    }: {
+      revision: number
+      layer: string
+      speaker: string | null
+    }) => commands.setBubbleSpeaker(revision, layer, speaker),
+    onSuccess: async () => {
+      await refresh(projectKey, pageKey)
+    },
+    onError: async (error) => {
+      reportError(error)
+      await refresh(projectKey, pageKey)
+    },
+  })
+}
+
+export function useSetBalloonShape() {
+  return useMutation({
+    mutationFn: ({
+      revision,
+      layer,
+      shape,
+    }: {
+      revision: number
+      layer: string
+      shape: BalloonShape
+    }) => commands.setBalloonShape(revision, layer, shape),
+    onSuccess: async () => {
+      await refresh(projectKey, pageKey)
+    },
+    onError: async (error) => {
+      reportError(error)
+      await refresh(projectKey, pageKey)
+    },
+  })
+}
+
+export function useGuessPageSpeakers() {
+  return useMutation({
+    mutationFn: ({ revision, page }: { revision: number; page: string }) =>
+      commands.guessPageSpeakers(revision, page),
+    onSuccess: async () => {
+      await refresh(projectKey, pageKey)
+    },
+    onError: async (error) => {
+      reportError(error)
+      await refresh(projectKey, pageKey)
+    },
   })
 }
 

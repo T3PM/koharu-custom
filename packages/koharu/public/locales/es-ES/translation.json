@@ -70,7 +70,11 @@
     "cancel": "Cancelar",
     "clearSearch": "Borrar búsqueda",
     "loading": "Cargando…",
-    "reset": "Restablecer"
+    "reset": "Restablecer",
+    "create": "Create",
+    "save": "Save",
+    "close": "Close",
+    "or": "or"
   },
   "errors": {
     "fatalTitle": "Koharu no pudo continuar",
@@ -154,7 +158,10 @@
     "stageCount_other": "{{count}} etapas",
     "stages": "Etapas",
     "stop": "Detener",
-    "stopProcessing": "Detener procesamiento"
+    "stopProcessing": "Detener procesamiento",
+    "chapter": "Chapter",
+    "currentChapter": "Current Chapter",
+    "currentChapterDescription": "Process all pages in the current chapter"
   },
   "inspector": {
     "alignBottom": "Alinear abajo",
@@ -199,7 +206,19 @@
     "unplaced": "Sin colocar",
     "vertical": "Vertical",
     "weight": "Peso",
-    "width": "Anchura"
+    "width": "Anchura",
+    "translate": "Translate",
+    "speaker": "Speaker",
+    "autoDetectSpeakers": "Auto-detect",
+    "noSpeaker": "None / Unassigned",
+    "balloonShape": "Balloon Shape",
+    "shapes": {
+      "normalSpeech": "Normal Speech",
+      "shout": "Shout / Jagged",
+      "thought": "Thought / Cloud",
+      "whisper": "Whisper",
+      "narration": "Narration Box"
+    }
   },
   "languages": {
     "en-US": "English",
@@ -304,7 +323,41 @@
     "translateChapter": "Traducir capítulo",
     "translatingChapter": "Traduciendo capítulo…",
     "processFolder": "Procesar todo en la carpeta",
-    "runOnChapter": "Procesar capítulo"
+    "runOnChapter": "Procesar capítulo",
+    "newFolder": "New Chapter Folder",
+    "deleteSelected": "Delete {{count}} pages",
+    "exportChapter": "Export PNG",
+    "folderActions": "Folder actions",
+    "importFilesToFolder": "Import files to this folder",
+    "importFolderToFolder": "Import folder to this chapter",
+    "exportPng": "Export as PNG",
+    "exportCbz": "Export as CBZ",
+    "exportPsd": "Export as PSD",
+    "renameFolder": "Rename Folder",
+    "deleteFolder": "Delete Folder",
+    "emptyFolder": "Drop pages here or import",
+    "emptyFolderHint": "Folders ready. Import pages to begin.",
+    "unassigned": "Other Pages",
+    "deleteFolderTitle": "Delete Chapter Folder \"{{name}}\"",
+    "deleteFolderDescription": "Choose how you want to delete this chapter folder. Both options will be recorded in Project Trash and can be restored.",
+    "folderContains": "This chapter contains {{count}} page(s).",
+    "deleteFolderAndPages": "Delete Folder and All Pages",
+    "deleteFolderAndPagesDesc": "Removes the folder and moves all pages inside it to Project Trash.",
+    "deleteFolderOnly": "Delete Folder Only",
+    "deleteFolderOnlyDesc": "Pages will remain safely in the project and become unassigned.",
+    "createFolderTitle": "Create Chapter Folder",
+    "createFolderDesc": "Enter a name for the new chapter or episode folder.",
+    "folderName": "Folder Name",
+    "moveSelectedHint": "{{count}} selected page(s) will be added to this folder.",
+    "renameFolderTitle": "Rename Folder",
+    "renameFolderDesc": "Enter a new name for this chapter folder. All pages inside will be updated.",
+    "setChapterTitle": "Set Page Chapter",
+    "setChapterDescription": "Organize this page into a chapter folder (leave empty for none).",
+    "chapterNamePlaceholder": "Chapter name (e.g. Chapter 01)",
+    "chapterName": "Chapter",
+    "setChapter": "Set Chapter...",
+    "moveToFolder": "Move to Folder",
+    "removeFromFolder": "Remove from Folder"
   },
   "outputPicker": {
     "instructions": "Instrucciones de traducción",
@@ -410,7 +463,22 @@
           "title": "OCR"
         }
       },
-      "title": "Canalización"
+      "title": "Canalización",
+      "ocrTitle": "OCR Options",
+      "textDirection": "Text Direction",
+      "textDirectionDescription": "Preferred text orientation for OCR reading",
+      "cropMargin": "Crop Margin",
+      "cropMarginDescription": "Padding pixels around detected text boxes",
+      "exportTitle": "Export Options",
+      "exportQuality": "Image Quality",
+      "exportQualityDescription": "Compression quality for exported JPEG / WebP / AVIF (1-100)",
+      "exportTemplate": "Export Path Template",
+      "exportTemplateDescription": "Naming pattern for exported files",
+      "hardwareTitle": "Hardware & Performance",
+      "workerThreads": "Worker Threads",
+      "workerThreadsDescription": "Parallel background worker threads (0 for auto)",
+      "vramBudget": "VRAM Budget (MB)",
+      "vramBudgetDescription": "Maximum VRAM allocation in MB for model inference (empty for auto)"
     },
     "providers": {
       "clearCredential": "Borrar credencial de {{provider}}",
@@ -453,7 +521,9 @@
       "targetLanguageDescription": "Elige el idioma al que se traducirá el texto.",
       "title": "Traducción",
       "translationModel": "Modelo de traducción",
-      "translationModelDescription": "Elige el modelo utilizado para traducir texto."
+      "translationModelDescription": "Elige el modelo utilizado para traducir texto.",
+      "contextWindowPages": "Context Window (Pages)",
+      "contextWindowDescription": "Number of previous translated pages to include as context (0 to disable)."
     },
     "typesetting": {
       "addFamily": "Añadir familia tipográfica",
@@ -483,7 +553,13 @@
       "clearFontSize": "Borrar tamaño de fuente predeterminado",
       "fontWeight": "Peso de fuente",
       "fontWeightDefault": "Predeterminado (Normal)",
-      "clearFontWeight": "Borrar peso de fuente predeterminado"
+      "clearFontWeight": "Borrar peso de fuente predeterminado",
+      "shoutFont": "Shout",
+      "clearShoutFont": "Clear shout font",
+      "thoughtFont": "Thought",
+      "clearThoughtFont": "Clear thought font",
+      "whisperFont": "Whisper",
+      "clearWhisperFont": "Clear whisper font"
     }
   },
   "start": {
@@ -505,7 +581,8 @@
     "projectNamePlaceholder": "Mi nuevo proyecto",
     "storageHint": "Los proyectos se guardan localmente en tu carpeta Documentos.",
     "title": "Proyectos",
-    "yourProjects": "Tus proyectos"
+    "yourProjects": "Tus proyectos",
+    "importFolderProject": "Import Folder as Project"
   },
   "startup": {
     "description": "Cargando los entornos locales de IA y preparando el espacio de trabajo. El primer inicio puede tardar un momento.",
@@ -567,6 +644,8 @@
     "confirmLanguageMismatch": "Importar pese a la diferencia de idioma",
     "deleteEntry": "Eliminar {{source}}",
     "deleteSelected": "Eliminar {{count}} seleccionados",
+    "deleteUntranslated": "Eliminar entradas no traducidas",
+    "clearAll": "Borrar todas las entradas",
     "dismissImportError": "Cerrar error de importación",
     "empty": "Aún no hay términos",
     "emptyDescription": "Analiza el proyecto o añade un término manualmente.",
@@ -656,6 +735,79 @@
     "unavailable": "Glosario no disponible",
     "unavailableDescription": "Abre un proyecto para gestionar su glosario.",
     "untranslated": "Sin traducir",
-    "waitingConfirmation": "Esperando confirmación"
+    "waitingConfirmation": "Esperando confirmación",
+    "locate": "Mostrar en la imagen",
+    "noOccurrences": "No se encontraron apariciones en las páginas",
+    "classifyNames": "Clasificar nombres (IA)",
+    "classifySelected": "Clasificar nombres seleccionados",
+    "classifying": "Clasificando nombres del glosario…",
+    "persona": "Character Persona",
+    "gender": "Gender",
+    "genderUnspecified": "Unspecified",
+    "genderMale": "Male",
+    "genderFemale": "Female",
+    "genderNonBinary": "Non-Binary",
+    "tone": "Tone",
+    "tonePlaceholder": "e.g. polite, playful",
+    "firstPerson": "1st Person (I/Me)",
+    "secondPerson": "2nd Person (You)",
+    "customInstructions": "Custom Persona Instructions",
+    "instructionsPlaceholder": "e.g. Speaks in tsundere manner, ends sentences with ~nya",
+    "honorificPolicy": "Honorific Policy",
+    "honorificPolicyPlaceholder": "keep, drop, or adapt",
+    "forbiddenVariantsPlaceholder": "Forbidden variants (comma-separated)",
+    "verifyQa": "Verify QA",
+    "qaIssuesCount": "{{count}} QA issues",
+    "qaPassed": "QA passed (0 issues)",
+    "settingsTooltip": "Glossary Settings & Substitution Rules",
+    "settingsTooltipActive": "Glossary Settings (Active)",
+    "settingsTooltipDisabled": "Glossary Settings (Disabled)",
+    "activeCount": "{{count}} Active",
+    "disabledStatus": "Disabled",
+    "settings": "Glossary",
+    "settingsTitle": "Glossary Settings",
+    "enforceInTranslation": "Enforce in Translation",
+    "enforceDesc": "Apply glossary entries during text and chapter translation",
+    "tokenShield": "Pre-translation Token Shield",
+    "tokenShieldDesc": "Protects terms with tokens before translation (Recommended for Google Translate & cloud models)",
+    "postReplace": "Post-translation Replacement",
+    "postReplaceDesc": "Scans output text and replaces leftover or untranslated source terms",
+    "matchingRules": "Matching Rules",
+    "caseSensitive": "Case Sensitive Matching",
+    "caseSensitiveDesc": "Distinguish uppercase and lowercase words",
+    "wholeWord": "Whole Words Only",
+    "wholeWordDesc": "Match boundary-delimited words (Latin/English terms only)",
+    "personasAndVoices": "AI Character Personas & Voices",
+    "enablePersonas": "Adopt Character Personas",
+    "personasDesc": "Inject gender, tone, and speech style into AI prompts",
+    "enableSpeakerTagging": "Speaker Tagging",
+    "taggingDesc": "Prefix dialogue with [Speaker: Name] tag in prompt",
+    "autoGuessSpeakers": "Auto-detect Dialogue Speakers",
+    "autoGuessDesc": "Infer speech bubble speakers from character glossary",
+    "autoSaved": "Settings saved automatically."
+  },
+  "trash": {
+    "title": "Project Trash & History",
+    "emptyTrash": "Empty Trash",
+    "description": "Restore deleted chapter folders, pages, or entire chapters back to your project at any time.",
+    "empty": "Trash is empty.",
+    "emptyHint": "Deleted items from this project will be listed here.",
+    "folderOnly": "Folder only",
+    "folderWithPages": "Folder ({{count}} pages)",
+    "pagesCount": "{{count}} page(s)",
+    "chapterLabel": "Chapter",
+    "restore": "Restore",
+    "deletePermanent": "Delete permanently"
+  },
+  "translation": {
+    "settingsTooltip": "Translation Settings & Provider",
+    "settingsTitle": "Translation Settings",
+    "provider": "Translation Provider",
+    "localModel": "Koharu Local Model",
+    "apiKey": "API Key",
+    "model": "Model Name (Optional Override)",
+    "customEndpoint": "Custom Endpoint / Proxy (Optional)",
+    "targetLang": "Target Language Code",
+    "autoSaved": "Settings saved automatically."
   }
 }

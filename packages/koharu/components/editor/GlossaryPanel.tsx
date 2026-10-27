@@ -10,6 +10,8 @@ import {
   Plus,
   ScanSearch,
   Search,
+  ShieldCheck,
+  Sparkles,
   Trash2,
   X,
 } from 'lucide-react'
@@ -18,6 +20,7 @@ import { useTranslation } from 'react-i18next'
 
 import { GlossaryEntryRow } from '@/components/editor/GlossaryEntryRow'
 import { GlossaryImportDialog } from '@/components/editor/GlossaryImportDialog'
+import { GlossarySettingsPopover } from '@/components/editor/GlossarySettingsPopover'
 import { reportError } from '@/lib/backend'
 import {
   eligibleGlossaryTranslationIds,
@@ -38,17 +41,22 @@ import {
   useProject,
   useScanGlossary,
   useSetGlossaryEnabled,
+  useClassifyGlossaryEntries,
   useTranslateGlossaryEntries,
   useUpdateGlossaryEntry,
 } from '@/lib/queries'
 import { useKoharuStore } from '@/lib/store'
-import type {
-  GlossaryEntryDraft,
-  GlossaryImportPreview,
-  GlossaryImportStrategy,
-  GlossaryKind,
-  Job,
+import {
+  commands,
+  type GlossaryEntryDraft,
+  type GlossaryImportPreview,
+  type GlossaryImportStrategy,
+  type GlossaryKind,
+  type GlossaryLintIssue,
+  type GlossaryScanReport,
+  type Job,
 } from '@koharu/bridge/protocol'
+import { Badge } from '@koharu/ui/components/badge'
 import { Button } from '@koharu/ui/components/button'
 import { Checkbox } from '@koharu/ui/components/checkbox'
 import {
@@ -88,6 +96,15 @@ export function GlossaryPanel() {
     preview: GlossaryImportPreview
   } | null>(null)
   const [importOpen, setImportOpen] = useState(false)
+  const [qaIssues, setQaIssues] = useState<GlossaryLintIssue[] | null>(null)
+  const [qaPending, setQaPending] = useState(false)
+  const [scanResult, setScanResult] = useState<{
+    projectName: string | undefined
+    generation: number
+    summary: GlossaryScanReport['summary']
+  } | null>(null)
+  const selectPages = useKoharuStore((state) => state.selectPages)
+  const selectLayers = useKoharuStore((state) => state.selectLayers)
   const fileInput = useRef<HTMLInputElement>(null)
   const projectGeneration = useRef({ projectName, generation: 0 })
   const importGeneration = useRef({ projectName, generation: 0 })
@@ -110,6 +127,7 @@ export function GlossaryPanel() {
   const update = useUpdateGlossaryEntry(glossary?.revision ?? 0, projectName)
   const remove = useDeleteGlossaryEntries(projectName)
   const translate = useTranslateGlossaryEntries(projectName)
+  const classify = useClassifyGlossaryEntries(projectName)
   const previewImport = usePreviewGlossaryImport(projectName)
   const applyImport = useApplyGlossaryImport(projectName)
   const exportGlossary = useExportGlossary(projectName)
@@ -129,6 +147,7 @@ export function GlossaryPanel() {
     update.isPending ||
     remove.isPending ||
     translate.isPending ||
+    classify.isPending ||
     previewImport.isPending ||
     applyImport.isPending ||
     exportGlossary.isPending
@@ -140,6 +159,12 @@ export function GlossaryPanel() {
     importState.generation === importGeneration.current.generation
       ? importState
       : null
+  const activeScanSummary =
+    scanResult &&
+    scanResult.projectName === projectGeneration.current.projectName &&
+    scanResult.generation === projectGeneration.current.generation
+      ? scanResult.summary
+      : null
 
   useEffect(() => {
     setSelected(new Set())
@@ -147,6 +172,9 @@ export function GlossaryPanel() {
     setImportError(null)
     setImportState(null)
     setImportOpen(false)
+    setQaIssues(null)
+    setQaPending(false)
+    setScanResult(null)
     if (fileInput.current) fileInput.current.value = ''
   }, [projectName])
 
@@ -221,6 +249,19 @@ export function GlossaryPanel() {
     }
   }
 
+  const runScan = async () => {
+    const captured = { ...projectGeneration.current }
+    setScanResult(null)
+    try {
+      const report = await scan.mutateAsync()
+      if (projectActionIsCurrent(captured)) {
+        setScanResult({ ...captured, summary: report.summary })
+      }
+    } catch {
+      // The scoped mutation reports current-project failures.
+    }
+  }
+
   const deleteUntranslated = async () => {
     if (processing || !glossary || untranslatedIds.length === 0) return
     const captured = { ...projectGeneration.current }
@@ -260,6 +301,26 @@ export function GlossaryPanel() {
   const translateIds = (ids: string[]) => {
     if (processing || ids.length === 0) return
     translate.mutate({ revision: glossary.revision, ids })
+  }
+
+  const runVerifyQa = async () => {
+    if (processing || qaPending) return
+    const captured = { ...projectGeneration.current }
+    setQaPending(true)
+    try {
+      const issues = await commands.lintGlossary(null)
+      if (projectActionIsCurrent(captured)) {
+        setQaIssues(issues)
+      }
+    } catch (error) {
+      if (projectActionIsCurrent(captured)) {
+        reportError(error)
+      }
+    } finally {
+      if (projectActionIsCurrent(captured)) {
+        setQaPending(false)
+      }
+    }
   }
 
   const readImport = async (file: File | undefined) => {
@@ -350,11 +411,23 @@ export function GlossaryPanel() {
             className='h-7 px-2 text-[10px]'
             disabled={processing}
             aria-label={scanLabel}
-            onClick={() => scan.mutate()}
+            onClick={() => void runScan()}
           >
             <ScanSearch className='size-3' />
             {scanLabel}
           </Button>
+          <Button
+            size='sm'
+            variant='outline'
+            className='h-7 px-2 text-[10px]'
+            disabled={processing || qaPending}
+            aria-label={t('glossary.verifyQa', 'Verify QA')}
+            onClick={() => void runVerifyQa()}
+          >
+            <ShieldCheck className='size-3' />
+            {t('glossary.verifyQa', 'Verify QA')}
+          </Button>
+          <GlossarySettingsPopover compact />
           <DropdownMenu>
             <DropdownMenuTrigger
               render={
@@ -377,6 +450,12 @@ export function GlossaryPanel() {
                 onClick={() => translateIds(allEligible)}
               >
                 <Languages /> {t('glossary.translateUntranslated')}
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                disabled={glossary.entries.length === 0 || processing}
+                onClick={() => classify.mutate({ revision: glossary.revision, ids: null })}
+              >
+                <Sparkles /> {t('glossary.classifyNames', 'Classify Names (AI)')}
               </DropdownMenuItem>
               <DropdownMenuSeparator />
               <DropdownMenuItem onClick={() => fileInput.current?.click()}>
@@ -419,6 +498,83 @@ export function GlossaryPanel() {
           />
         </div>
         <WorkflowStatus job={activeGlossaryJob} scanned={status === 'available'} />
+        {activeScanSummary ? (
+          <p
+            role='status'
+            aria-live='polite'
+            className='mt-2 rounded-md bg-muted/35 px-2 py-1.5 text-[10px] text-muted-foreground'
+          >
+            {activeScanSummary.status === 'no_source_text'
+              ? t('glossary.scanNoSourceText')
+              : activeScanSummary.status === 'no_terms_found'
+                ? t('glossary.scanNoTermsFound', {
+                    sourceTextCount: activeScanSummary.sourceTextCount,
+                  })
+                : t('glossary.scanUpdated', {
+                    sourceTextCount: activeScanSummary.sourceTextCount,
+                    candidateOccurrenceCount: activeScanSummary.candidateOccurrenceCount,
+                    distinctTermCount: activeScanSummary.distinctTermCount,
+                    addedEntryCount: activeScanSummary.addedEntryCount,
+                    matchedEntryCount: activeScanSummary.matchedEntryCount,
+                  })}
+          </p>
+        ) : null}
+        {qaIssues !== null ? (
+          <details
+            open
+            className='mt-2 rounded-md border border-border/70 bg-muted/20 p-2 text-[10px]'
+          >
+            <summary className='flex cursor-pointer items-center justify-between font-medium select-none'>
+              <span>
+                {qaIssues.length === 0
+                  ? t('glossary.qaPassed', 'QA passed (0 issues)')
+                  : t('glossary.qaIssuesCount', {
+                      count: qaIssues.length,
+                      defaultValue: '{{count}} QA issues',
+                    })}
+              </span>
+              <Badge
+                variant={qaIssues.length === 0 ? 'secondary' : 'destructive'}
+                className='h-4 px-1.5 text-[9px]'
+              >
+                {qaIssues.length}
+              </Badge>
+            </summary>
+            {qaIssues.length > 0 ? (
+              <ul className='mt-2 max-h-40 space-y-1 overflow-y-auto'>
+                {qaIssues.map((issue, idx) => (
+                  <li key={`${issue.layerId}-${issue.kind}-${idx}`}>
+                    <button
+                      type='button'
+                      className='flex w-full items-start gap-1.5 rounded px-1.5 py-1 text-left hover:bg-muted/60'
+                      onClick={() => {
+                        selectPages([issue.pageId])
+                        selectLayers([issue.layerId])
+                        void commands.selectPage(issue.pageId).catch(() => {})
+                      }}
+                    >
+                      <Badge
+                        variant={issue.severity === 'error' ? 'destructive' : 'secondary'}
+                        className='mt-0.5 h-3.5 shrink-0 px-1 text-[8px] uppercase'
+                      >
+                        {issue.severity}
+                      </Badge>
+                      <span className='min-w-0 flex-1'>
+                        <span className='block truncate font-medium text-foreground'>
+                          {issue.message}
+                        </span>
+                        <span className='block truncate text-[9px] text-muted-foreground'>
+                          {issue.chapter ? `${issue.chapter} · ` : ''}
+                          {issue.pageLabel}
+                        </span>
+                      </span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+          </details>
+        ) : null}
         {importError ? (
           <div role='alert' className='mt-2 flex items-start gap-1.5 text-[10px] text-destructive'>
             <span className='min-w-0 flex-1'>{importError}</span>
@@ -508,6 +664,20 @@ export function GlossaryPanel() {
             onClick={() => translateIds(selectedEligible)}
           >
             <Languages className='size-3' /> {t('glossary.translateSelected')}
+          </Button>
+          <Button
+            size='sm'
+            variant='ghost'
+            className='h-6 px-1.5 text-[9px]'
+            disabled={processing}
+            onClick={() =>
+              classify.mutate({
+                revision: glossary.revision,
+                ids: Array.from(selected),
+              })
+            }
+          >
+            <Sparkles className='size-3' /> {t('glossary.classifySelected', 'Classify Names')}
           </Button>
           <Button
             size='sm'
@@ -661,6 +831,7 @@ function ManualEntryForm({
           translation: normalizeGlossaryTranslation(translation),
           kind,
           enabled: true,
+          character: null,
         })
       }}
     >

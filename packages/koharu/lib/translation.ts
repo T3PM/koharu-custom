@@ -1,3 +1,4 @@
+import { loadGlossarySettings, restoreGlossaryTokens, substituteGlossaryTokens, type GlossarySettings } from '@/lib/glossary'
 import type {
   LanguageChoice,
   Model,
@@ -80,31 +81,50 @@ export async function executeTranslation(
   settings: TranslationSettings,
   targetLanguage?: string,
   glossaryEntries?: readonly { source: string; translation: string | null; enabled: boolean }[] | null,
+  glossarySettings?: GlossarySettings,
 ): Promise<string> {
   const text = sourceText.trim()
   if (!text) return ''
 
+  const gSettings = glossarySettings || loadGlossarySettings()
+  const useGlossary = gSettings.enabled && glossaryEntries && glossaryEntries.length > 0
+
+  let textToTranslate = text
+  let tokenMap = new Map<number, string>()
+
+  if (useGlossary && gSettings.preSubstitute) {
+    const sub = substituteGlossaryTokens(text, glossaryEntries, gSettings)
+    textToTranslate = sub.text
+    tokenMap = sub.tokenMap
+  }
+
   const target = (targetLanguage || settings.targetLanguage || 'en').split('-')[0]?.toLowerCase() || 'en'
   let prompt = settings.systemPrompt || DEFAULT_TRANSLATION_SETTINGS.systemPrompt
 
-  const activeGlossary = (glossaryEntries || [])
-    .filter((e) => e.enabled && e.translation?.trim() && e.source?.trim())
-    .map((e) => `- ${e.source.trim()}: ${e.translation!.trim()}`)
+  if (useGlossary) {
+    const activeGlossary = glossaryEntries
+      .filter((e) => e.enabled && e.translation?.trim() && e.source?.trim())
+      .map((e) => `- ${e.source.trim()}: ${e.translation!.trim()}`)
 
-  if (activeGlossary.length > 0) {
-    prompt += `\n\nGlossary / Character names reference (strictly adhere to these translations):\n${activeGlossary.join('\n')}`
+    if (activeGlossary.length > 0) {
+      prompt += `\n\nGlossary / Character names reference (strictly adhere to these translations):\n${activeGlossary.join('\n')}`
+    }
   }
+
+  let rawTranslated = ''
 
   switch (settings.provider) {
     case 'google': {
-      const endpoint = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=${encodeURIComponent(target)}&dt=t&q=${encodeURIComponent(text)}`
+      const endpoint = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=${encodeURIComponent(target)}&dt=t&q=${encodeURIComponent(textToTranslate)}`
       const res = await fetch(endpoint)
       if (!res.ok) throw new Error(`Google Translate error: ${res.statusText}`)
       const data = await res.json()
       if (Array.isArray(data) && Array.isArray(data[0])) {
-        return data[0].map((s: any) => s[0] || '').join('')
+        rawTranslated = data[0].map((s: any) => s[0] || '').join('')
+      } else {
+        rawTranslated = textToTranslate
       }
-      return text
+      break
     }
 
     case 'openai':
@@ -127,7 +147,7 @@ export async function executeTranslation(
           model,
           messages: [
             { role: 'system', content: prompt },
-            { role: 'user', content: `Translate the following text into ${target}:\n${text}` },
+            { role: 'user', content: `Translate the following text into ${target}:\n${textToTranslate}` },
           ],
           temperature: 0.3,
         }),
@@ -137,7 +157,8 @@ export async function executeTranslation(
         throw new Error(`LLM Error (${res.status}): ${err}`)
       }
       const data = await res.json()
-      return data.choices?.[0]?.message?.content?.trim() || text
+      rawTranslated = data.choices?.[0]?.message?.content?.trim() || textToTranslate
+      break
     }
 
     case 'gemini': {
@@ -148,7 +169,7 @@ export async function executeTranslation(
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           system_instruction: { parts: [{ text: prompt }] },
-          contents: [{ parts: [{ text: `Translate the following text into ${target}:\n${text}` }] }],
+          contents: [{ parts: [{ text: `Translate the following text into ${target}:\n${textToTranslate}` }] }],
           generationConfig: { temperature: 0.3 },
         }),
       })
@@ -157,7 +178,8 @@ export async function executeTranslation(
         throw new Error(`Gemini Error (${res.status}): ${err}`)
       }
       const data = await res.json()
-      return data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || text
+      rawTranslated = data.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || textToTranslate
+      break
     }
 
     case 'claude': {
@@ -174,7 +196,7 @@ export async function executeTranslation(
         body: JSON.stringify({
           model,
           system: prompt,
-          messages: [{ role: 'user', content: `Translate the following text into ${target}:\n${text}` }],
+          messages: [{ role: 'user', content: `Translate the following text into ${target}:\n${textToTranslate}` }],
           max_tokens: 1024,
           temperature: 0.3,
         }),
@@ -184,7 +206,8 @@ export async function executeTranslation(
         throw new Error(`Claude Error (${res.status}): ${err}`)
       }
       const data = await res.json()
-      return data.content?.[0]?.text?.trim() || text
+      rawTranslated = data.content?.[0]?.text?.trim() || textToTranslate
+      break
     }
 
     case 'deepl': {
@@ -193,7 +216,7 @@ export async function executeTranslation(
         ? 'https://api-free.deepl.com/v2/translate'
         : 'https://api.deepl.com/v2/translate'
       const body = new URLSearchParams()
-      body.append('text', text)
+      body.append('text', textToTranslate)
       body.append('target_lang', target.toUpperCase())
 
       const res = await fetch(endpoint, {
@@ -209,11 +232,20 @@ export async function executeTranslation(
         throw new Error(`DeepL Error (${res.status}): ${err}`)
       }
       const data = await res.json()
-      return data.translations?.[0]?.text || text
+      rawTranslated = data.translations?.[0]?.text || textToTranslate
+      break
     }
 
     case 'local': {
       throw new Error('Local translation is processed through Koharu local engine.')
     }
   }
+
+  let finalResult = rawTranslated
+
+  if (tokenMap.size > 0) {
+    finalResult = restoreGlossaryTokens(finalResult, tokenMap)
+  }
+
+  return finalResult
 }

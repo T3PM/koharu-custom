@@ -30,7 +30,7 @@ export function StartView() {
   const [projects, setProjects] = useState<ProjectSummary[]>([])
   const [name, setName] = useState('')
   const [busy, setBusy] = useState<string | null>('list')
-  const [projectToDelete, setProjectToDelete] = useState<string | null>(null)
+  const [projectToDelete, setProjectToDelete] = useState<ProjectSummary | null>(null)
 
   const reload = useCallback(async () => {
     setBusy('list')
@@ -70,11 +70,11 @@ export function StartView() {
     }
   }
 
-  const openProject = async (projectName: string) => {
+  const openProject = async (project: ProjectSummary) => {
     if (busy) return
-    setBusy(projectName)
+    setBusy(project.name)
     try {
-      await call(commands.openProject, projectName)
+      await call(commands.openProject, project.path)
       await refresh(projectKey, pagesKey, pageKey)
     } finally {
       setBusy(null)
@@ -82,11 +82,11 @@ export function StartView() {
   }
 
   const deleteProject = async () => {
-    const projectName = projectToDelete
-    if (busy || !projectName) return
-    setBusy(projectName)
+    const target = projectToDelete
+    if (busy || !target) return
+    setBusy(target.name)
     try {
-      await call(commands.deleteProject, projectName)
+      await call(commands.deleteProject, target.path)
       await reload()
       setProjectToDelete(null)
     } finally {
@@ -240,13 +240,13 @@ export function StartView() {
                     <ul className='grid gap-0.5' aria-label={t('start.projectList')}>
                       {projects.map((project) => (
                         <li
-                          key={project.name}
+                          key={project.path}
                           className='group flex min-w-0 items-center rounded-lg hover:bg-foreground/[0.045]'
                         >
                           <button
                             type='button'
                             className='flex min-w-0 flex-1 items-center gap-3 rounded-lg px-3 py-2.5 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset'
-                            onClick={() => void openProject(project.name).catch(() => undefined)}
+                            onClick={() => void openProject(project).catch(() => undefined)}
                             disabled={busy !== null}
                           >
                             <span className='grid size-8 shrink-0 place-items-center rounded-lg bg-accent text-accent-foreground'>
@@ -256,8 +256,8 @@ export function StartView() {
                               <span className='block truncate text-[11px] font-medium'>
                                 {project.name}
                               </span>
-                              <span className='mt-0.5 block text-[9px] text-muted-foreground'>
-                                {t('start.projectKind')}
+                              <span className='mt-0.5 block truncate text-[9px] text-muted-foreground' title={project.path}>
+                                {project.path}
                               </span>
                             </span>
                           </button>
@@ -267,7 +267,7 @@ export function StartView() {
                             variant='ghost'
                             className='mr-2 size-7 shrink-0 text-muted-foreground opacity-0 group-hover:opacity-100 hover:text-foreground focus-visible:opacity-100'
                             aria-label={t('start.deleteLabel', { name: project.name })}
-                            onClick={() => setProjectToDelete(project.name)}
+                            onClick={() => setProjectToDelete(project)}
                             disabled={busy !== null}
                           >
                             <Trash2 className='size-3.5' />
@@ -290,7 +290,7 @@ export function StartView() {
           </AlertDialogMedia>
           <AlertDialogTitle>{t('start.deleteTitle')}</AlertDialogTitle>
           <AlertDialogDescription>
-            {t('start.deleteDescription', { name: projectToDelete })}
+            {t('start.deleteDescription', { name: projectToDelete?.name })}
           </AlertDialogDescription>
         </AlertDialogHeader>
         <AlertDialogFooter>

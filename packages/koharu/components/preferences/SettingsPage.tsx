@@ -27,6 +27,7 @@ import { TranslationPreferences } from '@/components/preferences/TranslationPref
 import { TypesettingPreferences } from '@/components/preferences/TypesettingPreferences'
 import { refreshPreferences, refreshTranslationModels, savePreferences } from '@/lib/backend'
 import { supportedLanguages } from '@/lib/i18n'
+import { pageKey, refresh } from '@/lib/queries'
 import { receivePreferences, useKoharuStore, type ShortcutAction } from '@/lib/store'
 import {
   type PipelineConfig,
@@ -72,6 +73,7 @@ export function SettingsPage() {
   const translation = pipeline?.translation ?? null
   const lastSaved = useRef<string | null>(null)
   const lastSavedProviders = useRef<string | null>(null)
+  const lastSavedTypesetting = useRef<string | null>(null)
   const saveGeneration = useRef(0)
   const saveQueue = useRef<Promise<void>>(Promise.resolve())
   const lastPending = useRef<{ serialized: string; promise: Promise<Preferences> } | null>(null)
@@ -112,6 +114,11 @@ export function SettingsPage() {
       }
       if (generation !== saveGeneration.current || currentDraft.current !== serialized) return
       receivePreferences(saved)
+      const serializedTypesetting = JSON.stringify(typesetting)
+      if (serializedTypesetting !== lastSavedTypesetting.current) {
+        lastSavedTypesetting.current = serializedTypesetting
+        void refresh(pageKey).catch(() => undefined)
+      }
       if (providersChanged) {
         lastSavedProviders.current = serializedProviders
         void refreshTranslationModels(true).catch(() => undefined)
@@ -138,6 +145,7 @@ export function SettingsPage() {
         preferences.typesetting,
       ])
       lastSavedProviders.current = JSON.stringify(preferences.providers)
+      lastSavedTypesetting.current = JSON.stringify(preferences.typesetting)
     }
   }, [open, preferences])
 

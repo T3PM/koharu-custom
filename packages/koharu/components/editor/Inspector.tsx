@@ -29,7 +29,7 @@ import { useTranslation } from 'react-i18next'
 import { ColorWell } from '@/components/controls/ColorWell'
 import { CommitTextarea } from '@/components/controls/CommitTextarea'
 import { FontPicker } from '@/components/controls/FontPicker'
-import { call } from '@/lib/backend'
+import { call, reportError } from '@/lib/backend'
 import {
   expandLayerSelection,
   isGroupLayer,
@@ -37,8 +37,8 @@ import {
   isTextLayer,
   layerChildren,
 } from '@/lib/document'
-import { applyGlossaryReplacements } from '@/lib/glossary'
 import { TranslationSettingsPopover } from '@/components/editor/TranslationSettingsPopover'
+import { GlossarySettingsPopover } from '@/components/editor/GlossarySettingsPopover'
 import { executeTranslation, loadTranslationSettings } from '@/lib/translation'
 import {
   pageKey,
@@ -47,13 +47,17 @@ import {
   refresh,
   useFonts,
   useGlossary,
+  useGuessPageSpeakers,
   usePage,
   useProject,
+  useSetBalloonShape,
+  useSetBubbleSpeaker,
 } from '@/lib/queries'
 import { useKoharuStore } from '@/lib/store'
 import { previewCanvasOpacity } from '@koharu/bridge/canvas'
 import {
   commands,
+  type BalloonShape,
   type EntityId,
   type FontFamily,
   type FontStyle,
@@ -525,7 +529,7 @@ function LayersInspector() {
 
     const translateSingleText = async (textLayer: Layer) => {
       if (textLayer.type !== 'text') return
-      const sourceText = textLayer.content.source?.text || textLayer.content.translation?.text || ''
+      const sourceText = textLayer.content.source?.text ?? ''
       if (!sourceText.trim()) return
 
       const settings = loadTranslationSettings()
@@ -540,11 +544,7 @@ function LayersInspector() {
       const glossaryEntries = glossary?.enabled ? glossary.entries : []
       const translated = await executeTranslation(sourceText, settings, targetLang, glossaryEntries)
       if (translated) {
-        const finalTranslated =
-          glossary?.enabled && glossary.entries.length > 0
-            ? applyGlossaryReplacements(translated, glossary.entries)
-            : translated
-        await call(commands.setTranslation, textLayer.id, finalTranslated)
+        await call(commands.setTranslation, textLayer.id, translated)
       }
     }
 
@@ -819,6 +819,7 @@ function LayerRow({
               {(layer.type === 'text' || isGroupLayer(layer)) && (
                 <>
                   <TranslationSettingsPopover compact />
+                  <GlossarySettingsPopover compact />
                   <button
                     type='button'
                     aria-label={
@@ -887,7 +888,12 @@ function LayerRow({
         </div>
         {expanded && (
           <div className='animate-in duration-150 fade-in slide-in-from-top-1 motion-reduce:animate-none'>
-            <LayerEditor layer={layer} onDelete={onDelete} />
+            <LayerEditor
+              layer={layer}
+              onDelete={onDelete}
+              onTranslate={onTranslate}
+              isTranslating={translating}
+            />
           </div>
         )}
       </div>
@@ -895,9 +901,29 @@ function LayerRow({
   )
 }
 
-function LayerEditor({ layer, onDelete }: { layer: Layer; onDelete?: () => void }) {
+function LayerEditor({
+  layer,
+  onDelete,
+  onTranslate,
+  isTranslating,
+}: {
+  layer: Layer
+  onDelete?: () => void
+  onTranslate?: () => void
+  isTranslating?: boolean
+}) {
   const { t } = useTranslation()
   const name = localizedLayerName(layer, 0, t)
+  const project = useProject().data
+  const page = usePage().data
+  const glossary = useGlossary(project?.name).data
+  const setBubbleSpeaker = useSetBubbleSpeaker()
+  const setBalloonShape = useSetBalloonShape()
+  const guessPageSpeakers = useGuessPageSpeakers()
+  const personEntries = useMemo(
+    () => glossary?.entries.filter((e) => e.kind === 'person') ?? [],
+    [glossary],
+  )
   const [opacity, setOpacity] = useState(layer.visibility.opacity * 100)
 
   useEffect(() => {
@@ -922,7 +948,7 @@ function LayerEditor({ layer, onDelete }: { layer: Layer; onDelete?: () => void 
     if (!isTextLayer(layer) || !layer.automatic_region || !layer.geometry) return
     void call(commands.setGeometry, [{ layer: layer.id, points: null }])
       .then(() => refresh(projectKey, pageKey))
-      .catch(() => undefined)
+      .catch(reportError)
   }
 
   return (
@@ -1010,7 +1036,7 @@ function LayerEditor({ layer, onDelete }: { layer: Layer; onDelete?: () => void 
               onCommit={(text) =>
                 void call(commands.setSourceText, layer.id, text)
                   .then(() => refresh(projectKey, pageKey))
-                  .catch(() => undefined)
+                  .catch(reportError)
               }
             />
           </InspectorField>
@@ -1019,6 +1045,23 @@ function LayerEditor({ layer, onDelete }: { layer: Layer; onDelete?: () => void 
               <span className='text-[8px] font-medium tracking-[0.06em] text-muted-foreground uppercase'>
                 {t('inspector.translation')}
               </span>
+              {onTranslate && (
+                <Button
+                  type='button'
+                  variant='ghost'
+                  size='xs'
+                  className='h-4 px-1.5 text-[8px] text-muted-foreground hover:text-foreground'
+                  onClick={onTranslate}
+                  disabled={isTranslating}
+                >
+                  {isTranslating ? (
+                    <LoaderCircle className='size-2.5 animate-spin' />
+                  ) : (
+                    <Languages className='mr-1 size-2.5' />
+                  )}
+                  {t('inspector.translate', 'Translate')}
+                </Button>
+              )}
             </div>
             <CommitTextarea
               data-testid={`edit-translation-${layer.id}`}
@@ -1029,9 +1072,105 @@ function LayerEditor({ layer, onDelete }: { layer: Layer; onDelete?: () => void 
               onCommit={(text) =>
                 void call(commands.setTranslation, layer.id, text.trim() ? text : null)
                   .then(() => refresh(projectKey, pageKey))
-                  .catch(() => undefined)
+                  .catch(reportError)
               }
             />
+          </div>
+          <div className='grid min-w-0 gap-0.5'>
+            <div className='flex items-center justify-between'>
+              <span className='text-[8px] font-medium tracking-[0.06em] text-muted-foreground uppercase'>
+                {t('inspector.speaker', 'Speaker')}
+              </span>
+              <div className='flex items-center gap-0.5'>
+                <GlossarySettingsPopover compact />
+                {page && (
+                  <Button
+                    type='button'
+                    variant='ghost'
+                    size='xs'
+                    className='h-4 px-1 text-[8px] text-muted-foreground hover:text-foreground'
+                    disabled={!project || guessPageSpeakers.isPending}
+                    onClick={() => {
+                      if (!project || !page) return
+                      guessPageSpeakers.mutate({ revision: project.revision, page: page.id })
+                    }}
+                  >
+                    {t('inspector.autoDetectSpeakers', 'Auto-detect')}
+                  </Button>
+                )}
+              </div>
+            </div>
+            <Select
+              value={layer.speaker ?? 'none'}
+              disabled={!project}
+              items={{
+                none: t('inspector.noSpeaker', 'None / Unassigned'),
+                ...Object.fromEntries(
+                  personEntries.map((p) => [
+                    p.id,
+                    p.translation ? `${p.source} (${p.translation})` : p.source,
+                  ]),
+                ),
+              }}
+              onValueChange={(val) => {
+                if (!project || !val) return
+                const speakerId = val === 'none' ? null : val
+                setBubbleSpeaker.mutate({ revision: project.revision, layer: layer.id, speaker: speakerId })
+              }}
+            >
+              <SelectTrigger size='sm' className='h-7 w-full text-[11px]'>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value='none'>{t('inspector.noSpeaker', 'None / Unassigned')}</SelectItem>
+                {personEntries.map((person) => (
+                  <SelectItem key={person.id} value={person.id}>
+                    {person.source} {person.translation ? `(${person.translation})` : ''}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+          </div>
+          <div className='grid min-w-0 gap-0.5'>
+            <span className='text-[8px] font-medium tracking-[0.06em] text-muted-foreground uppercase'>
+              {t('inspector.balloonShape', 'Balloon Shape')}
+            </span>
+            <Select
+              value={layer.balloon_shape ?? 'normal_speech'}
+              disabled={!project}
+              items={{
+                normal_speech: t('inspector.shapes.normalSpeech', 'Normal Speech'),
+                shout: t('inspector.shapes.shout', 'Shout / Jagged'),
+                thought: t('inspector.shapes.thought', 'Thought / Cloud'),
+                whisper: t('inspector.shapes.whisper', 'Whisper'),
+                narration: t('inspector.shapes.narration', 'Narration Box'),
+              }}
+              onValueChange={(val) => {
+                if (!project || !val) return
+                setBalloonShape.mutate({
+                  revision: project.revision,
+                  layer: layer.id,
+                  shape: val as BalloonShape,
+                })
+              }}
+            >
+              <SelectTrigger size='sm' className='h-7 w-full text-[11px]'>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value='normal_speech'>
+                  {t('inspector.shapes.normalSpeech', 'Normal Speech')}
+                </SelectItem>
+                <SelectItem value='shout'>{t('inspector.shapes.shout', 'Shout / Jagged')}</SelectItem>
+                <SelectItem value='thought'>
+                  {t('inspector.shapes.thought', 'Thought / Cloud')}
+                </SelectItem>
+                <SelectItem value='whisper'>{t('inspector.shapes.whisper', 'Whisper')}</SelectItem>
+                <SelectItem value='narration'>
+                  {t('inspector.shapes.narration', 'Narration Box')}
+                </SelectItem>
+              </SelectContent>
+            </Select>
           </div>
         </>
       )}

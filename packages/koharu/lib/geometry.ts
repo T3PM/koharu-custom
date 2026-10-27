@@ -62,6 +62,10 @@ export function selectableLayer(layer: Layer): boolean {
   return layer.type === 'text' || layer.type === 'image'
 }
 
+export function selectableTextLayer(layer: Layer): boolean {
+  return layer.type === 'text'
+}
+
 export function layerFrame(layer: Layer): Frame | null {
   const points =
     layer.type === 'text' || layer.type === 'image' || layer.type === 'artwork'

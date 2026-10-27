@@ -9,7 +9,7 @@ import { CanvasOverlay } from '@/components/editor/CanvasOverlay'
 import { StatusBar } from '@/components/editor/StatusBar'
 import { ToolBar } from '@/components/editor/ToolBar'
 import { useCanvas } from '@/components/editor/useCanvas'
-import { call } from '@/lib/backend'
+import { call, reportError } from '@/lib/backend'
 import { expandLayerSelection } from '@/lib/document'
 import {
   controlFrame,
@@ -199,8 +199,17 @@ export function CanvasWorkspace() {
     }
     commitPending.current = true
     void enqueue(() => call(commands.commitTransform, revision, elements))
-      .then((revision) => (revision === null ? undefined : refresh(projectKey, pagesKey, pageKey)))
-      .catch(() => canvas?.cancelTransform())
+      .then((revision) => {
+        if (revision === null) {
+          canvas?.cancelTransform()
+        }
+        return refresh(projectKey, pagesKey, pageKey)
+      })
+      .catch((error) => {
+        canvas?.cancelTransform()
+        reportError(error)
+        return refresh(projectKey, pagesKey, pageKey)
+      })
       .finally(() => {
         commitPending.current = false
         setPreviews({})

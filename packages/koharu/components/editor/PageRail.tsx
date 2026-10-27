@@ -11,7 +11,6 @@ import {
   FolderOpen,
   FolderPlus,
   Languages,
-  Plus,
   LoaderCircle,
   MoreHorizontal,
   Play,
@@ -20,7 +19,7 @@ import {
   Sparkles,
   Trash2,
 } from 'lucide-react'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { ModelPicker } from '@/components/controls/ModelPicker'
@@ -33,10 +32,9 @@ import {
 } from '@/components/editor/InferenceControl'
 import { ResourceMonitor } from '@/components/editor/ResourceMonitor'
 import { ProjectTrashDialog } from '@/components/editor/ProjectTrashDialog'
-import { call, refreshTranslationModels, savePreferences } from '@/lib/backend'
-import { applyGlossaryReplacements } from '@/lib/glossary'
+import { call, refreshTranslationModels, reportError, savePreferences } from '@/lib/backend'
+import { executeTranslation, loadTranslationSettings } from '@/lib/translation'
 import {
-  glossaryKey,
   pageKey,
   pagesKey,
   preparedPageKey,
@@ -137,7 +135,9 @@ export function PageRail() {
       if (stored) {
         setCustomFolders(JSON.parse(stored))
       }
-    } catch {}
+    } catch (error) {
+      reportError(error)
+    }
   }, [foldersStorageKey])
 
   const persistFolders = (folders: string[]) => {
@@ -145,7 +145,9 @@ export function PageRail() {
     if (foldersStorageKey && typeof window !== 'undefined') {
       try {
         window.localStorage.setItem(foldersStorageKey, JSON.stringify(folders))
-      } catch {}
+      } catch (error) {
+        reportError(error)
+      }
     }
   }
 
@@ -170,13 +172,13 @@ export function PageRail() {
     }
   }
 
-  const handleDeleteSelectedPages = async () => {
+  const handleDeleteSelectedPages = useCallback(async () => {
     if (selected.length === 0) return
     const ids = [...selected]
     await call(commands.deletePages, ids)
     selectPages([])
     await refresh(projectKey, pagesKey, pageKey)
-  }
+  }, [selectPages, selected])
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -198,7 +200,7 @@ export function PageRail() {
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [selected])
+  }, [handleDeleteSelectedPages, selected])
   const [newFolderOpen, setNewFolderOpen] = useState(false)
   const [newFolderName, setNewFolderName] = useState('')
   const [renamingFolder, setRenamingFolder] = useState<string | null>(null)
@@ -426,26 +428,33 @@ export function PageRail() {
           )
 
           let pageUpdated = false
+          const translationSettings = loadTranslationSettings()
+          const glossaryEntries = glossary?.enabled ? glossary.entries : []
+
           for (const layer of textLayers) {
-            const sourceText = layer.content.source?.text || layer.content.translation?.text || ''
+            const sourceText = layer.content.source?.text ?? ''
             if (!sourceText.trim()) continue
 
             try {
-              const endpoint = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=${encodeURIComponent(cleanTarget)}&dt=t&q=${encodeURIComponent(sourceText)}`
-              const res = await fetch(endpoint)
-              if (!res.ok) continue
-              const data = await res.json()
-              let translated = ''
-              if (Array.isArray(data) && Array.isArray(data[0])) {
-                translated = data[0].map((segment: any) => segment[0] || '').join('')
-              }
-              if (translated) {
-                const finalTranslated =
-                  glossary?.enabled && glossary.entries.length > 0
-                    ? applyGlossaryReplacements(translated, glossary.entries)
-                    : translated
-                await call(commands.setTranslation, layer.id, finalTranslated)
+              if (translationSettings.provider === 'local') {
+                await call(commands.setTranslation, layer.id, null)
+                await call(
+                  commands.process,
+                  { scope: 'entities', value: [layer.id] },
+                  { operation: 'only', stage: 'translation' },
+                )
                 pageUpdated = true
+              } else {
+                const translated = await executeTranslation(
+                  sourceText,
+                  translationSettings,
+                  cleanTarget,
+                  glossaryEntries,
+                )
+                if (translated) {
+                  await call(commands.setTranslation, layer.id, translated)
+                  pageUpdated = true
+                }
               }
             } catch (err) {
               console.error(`Failed to translate layer ${layer.id}:`, err)
@@ -463,7 +472,9 @@ export function PageRail() {
       if (initialActive) {
         try {
           await call(commands.selectPage, initialActive)
-        } catch {}
+        } catch (error) {
+          reportError(error)
+        }
       }
       await refresh(projectKey, pagesKey, pageKey)
       setTranslatingChapter(null)
@@ -504,8 +515,6 @@ export function PageRail() {
     setRenamingFolder(null)
     await refresh(projectKey, pagesKey, pageKey)
   }
-
-// deleteFolder replaced by handleDeleteFolderChoice
 
   const closeRename = () => {
     setRenaming(null)

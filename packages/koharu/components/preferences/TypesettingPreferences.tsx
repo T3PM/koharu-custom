@@ -177,6 +177,90 @@ export function TypesettingPreferences({
 
           <div className='flex min-w-0 items-center gap-3 px-3 py-2'>
             <span className='w-24 shrink-0 text-[11px] font-medium text-foreground'>
+              {t('settings.typesetting.shoutFont', 'Shout')}
+            </span>
+            <div className='min-w-0 flex-1'>
+              <FontPicker
+                value={value.shout_font ?? ''}
+                families={families}
+                ariaLabel={t('settings.typesetting.shoutFont', 'Shout')}
+                placeholder={t('settings.typesetting.defaultFallback', 'Default font fallback')}
+                onChange={(font) => onChange({ ...value, shout_font: font || null })}
+              />
+            </div>
+            {value.shout_font && (
+              <Button
+                type='button'
+                variant='ghost'
+                size='icon-sm'
+                aria-label={t('settings.typesetting.clearShoutFont', 'Clear shout font')}
+                title={t('settings.typesetting.clearShoutFont', 'Clear shout font')}
+                className='shrink-0 text-muted-foreground hover:bg-destructive/10 hover:text-destructive'
+                onClick={() => onChange({ ...value, shout_font: null })}
+              >
+                <Trash2 className='size-3.5' />
+              </Button>
+            )}
+          </div>
+
+          <div className='flex min-w-0 items-center gap-3 px-3 py-2'>
+            <span className='w-24 shrink-0 text-[11px] font-medium text-foreground'>
+              {t('settings.typesetting.thoughtFont', 'Thought')}
+            </span>
+            <div className='min-w-0 flex-1'>
+              <FontPicker
+                value={value.thought_font ?? ''}
+                families={families}
+                ariaLabel={t('settings.typesetting.thoughtFont', 'Thought')}
+                placeholder={t('settings.typesetting.defaultFallback', 'Default font fallback')}
+                onChange={(font) => onChange({ ...value, thought_font: font || null })}
+              />
+            </div>
+            {value.thought_font && (
+              <Button
+                type='button'
+                variant='ghost'
+                size='icon-sm'
+                aria-label={t('settings.typesetting.clearThoughtFont', 'Clear thought font')}
+                title={t('settings.typesetting.clearThoughtFont', 'Clear thought font')}
+                className='shrink-0 text-muted-foreground hover:bg-destructive/10 hover:text-destructive'
+                onClick={() => onChange({ ...value, thought_font: null })}
+              >
+                <Trash2 className='size-3.5' />
+              </Button>
+            )}
+          </div>
+
+          <div className='flex min-w-0 items-center gap-3 px-3 py-2'>
+            <span className='w-24 shrink-0 text-[11px] font-medium text-foreground'>
+              {t('settings.typesetting.whisperFont', 'Whisper')}
+            </span>
+            <div className='min-w-0 flex-1'>
+              <FontPicker
+                value={value.whisper_font ?? ''}
+                families={families}
+                ariaLabel={t('settings.typesetting.whisperFont', 'Whisper')}
+                placeholder={t('settings.typesetting.defaultFallback', 'Default font fallback')}
+                onChange={(font) => onChange({ ...value, whisper_font: font || null })}
+              />
+            </div>
+            {value.whisper_font && (
+              <Button
+                type='button'
+                variant='ghost'
+                size='icon-sm'
+                aria-label={t('settings.typesetting.clearWhisperFont', 'Clear whisper font')}
+                title={t('settings.typesetting.clearWhisperFont', 'Clear whisper font')}
+                className='shrink-0 text-muted-foreground hover:bg-destructive/10 hover:text-destructive'
+                onClick={() => onChange({ ...value, whisper_font: null })}
+              >
+                <Trash2 className='size-3.5' />
+              </Button>
+            )}
+          </div>
+
+          <div className='flex min-w-0 items-center gap-3 px-3 py-2'>
+            <span className='w-24 shrink-0 text-[11px] font-medium text-foreground'>
               {t('settings.typesetting.sfxFont', 'SFX')}
             </span>
             <div className='min-w-0 flex-1'>
