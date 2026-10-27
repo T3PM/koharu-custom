@@ -165,6 +165,7 @@ fn is_out_of_memory(error: &anyhow::Error) -> bool {
         message.contains("out of memory")
             || message.contains("cuda_error_out_of_memory")
             || message.contains("not enough memory")
+            || message.contains("null result from llama cpp")
     })
 }
 
@@ -203,4 +204,22 @@ pub(crate) struct StageCompletion {
     pub(crate) model: String,
     pub(crate) elapsed: Duration,
     pub(crate) outcome: std::result::Result<StageOutcome, PipelineError>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detects_out_of_memory_errors() {
+        let err = anyhow::anyhow!("failed to load quantized PaddleOCR-VL-1.6")
+            .context("failed to load GGUF model: null result from llama cpp");
+        assert!(is_out_of_memory(&err));
+
+        let err_cuda = anyhow::anyhow!("CUDA_ERROR_OUT_OF_MEMORY: out of memory");
+        assert!(is_out_of_memory(&err_cuda));
+
+        let other_err = anyhow::anyhow!("file not found");
+        assert!(!is_out_of_memory(&other_err));
+    }
 }

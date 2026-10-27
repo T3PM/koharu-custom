@@ -10,8 +10,8 @@ use koharu_rasterizer::{
 use vello::kurbo::Affine;
 
 use crate::{
-    Error, FontStyle, HyphenationPolicy, LayoutRun, RenderBounds, RenderDiagnostic,
-    Result as RenderResult, TextAlign, TextLayout, WritingMode,
+    BalloonSilhouette, Error, FontStyle, HyphenationPolicy, LayoutRun, RenderBounds,
+    RenderDiagnostic, Result as RenderResult, TextAlign, TextLayout, WritingMode,
     bubble::LayoutBox,
     fonts::{Fonts, font_key},
     script::is_chinese_or_japanese_text,
@@ -25,6 +25,7 @@ pub(crate) struct TextNodeDescriptor {
     pub(crate) width: f32,
     pub(crate) height: f32,
     pub(crate) balloon_contour: Option<Vec<(f32, f32)>>,
+    pub(crate) balloon_silhouette: BalloonSilhouette,
     pub(crate) preferred_font: Option<String>,
     pub(crate) font_families: Vec<String>,
     pub(crate) font_weight: Option<u16>,
@@ -36,6 +37,7 @@ pub(crate) struct TextNodeDescriptor {
     pub(crate) writing_mode: WritingMode,
     pub(crate) foreground_color: [u8; 4],
     pub(crate) stroke: Option<StrokeOptions>,
+    pub(crate) outer_stroke: Option<StrokeOptions>,
     pub(crate) line_height: f32,
     pub(crate) letter_spacing: f32,
     pub(crate) word_spacing: f32,
@@ -65,7 +67,6 @@ pub(crate) struct StrokeOptions {
     pub width_px: f32,
 }
 
-/// Paint options used when recording one laid-out text run into a Vello scene.
 #[derive(Debug, Clone)]
 pub(crate) struct TextRenderOptions {
     pub color: [u8; 4],
@@ -73,6 +74,7 @@ pub(crate) struct TextRenderOptions {
     pub padding: f32,
     pub baseline_shift: f32,
     pub stroke: Option<StrokeOptions>,
+    pub outer_stroke: Option<StrokeOptions>,
 }
 
 impl Default for TextRenderOptions {
@@ -83,6 +85,7 @@ impl Default for TextRenderOptions {
             padding: 0.0,
             baseline_shift: 0.0,
             stroke: None,
+            outer_stroke: None,
         }
     }
 }
@@ -110,6 +113,27 @@ impl TextRenderer {
         options: &TextRenderOptions,
         transform: Affine,
     ) {
+        let inner_width = options
+            .stroke
+            .filter(|stroke| stroke.width_px > 0.0 && stroke.color[3] > 0)
+            .map_or(0.0, |stroke| stroke.width_px);
+        if let Some(outer) = options
+            .outer_stroke
+            .filter(|stroke| stroke.width_px > 0.0 && stroke.color[3] > 0)
+        {
+            draw_layout(
+                scene,
+                resources,
+                layout,
+                writing_mode,
+                options,
+                transform,
+                GlyphPaint {
+                    color: outer.color,
+                    dilation_px: inner_width + outer.width_px,
+                },
+            );
+        }
         // The border is drawn first as an outward-only dilation of the glyph outline (see
         // `draw_layout`), then the ordinary fill is drawn on top in the foreground color. Unlike a
         // centered stroke, a dilation never grows inward, so it can't punch a hole through small
@@ -212,12 +236,14 @@ impl TextRenderer {
         if let Some(contour) = &descriptor.balloon_contour {
             let [top, _, _, left] = descriptor.text_inset;
             let contour = contour.iter().map(|&(x, y)| (x - left, y - top)).collect();
-            layout = layout.with_comic_balloon(
-                bounds.width,
-                bounds.height,
-                contour,
-                descriptor.text_inset.into_iter().fold(0.0, f32::max),
-            );
+            layout = layout
+                .with_comic_balloon(
+                    bounds.width,
+                    bounds.height,
+                    contour,
+                    descriptor.text_inset.into_iter().fold(0.0, f32::max),
+                )
+                .with_balloon_silhouette(descriptor.balloon_silhouette);
         }
         if let Some(language) = &descriptor.language {
             layout = layout.with_hyphenation_language_tag(language.as_str());
@@ -247,16 +273,14 @@ impl TextRenderer {
         y += layout.placement_offset_y();
         let transform = Affine::translate((f64::from(x), f64::from(y)));
         let color = descriptor.foreground_color;
-        let mut options = TextRenderOptions {
+        let options = TextRenderOptions {
             color,
-            stroke: None,
+            stroke: descriptor.stroke,
+            outer_stroke: descriptor.outer_stroke,
             ..TextRenderOptions::default()
         };
         let mut scene = PreparedScene::default();
         let mut resources = Vec::new();
-        if let Some(stroke) = descriptor.stroke {
-            options.stroke = Some(stroke);
-        }
         self.render(
             &mut scene,
             &mut resources,
@@ -290,7 +314,10 @@ impl TextRenderer {
         };
         let stroke_padding = descriptor
             .stroke
-            .map_or(0.0, |stroke| stroke.width_px.max(0.0));
+            .map_or(0.0, |stroke| stroke.width_px.max(0.0))
+            + descriptor
+                .outer_stroke
+                .map_or(0.0, |stroke| stroke.width_px.max(0.0));
         Ok(RenderedTextNode {
             scene: Arc::new(scene),
             resources: resources.into(),
@@ -453,6 +480,7 @@ mod tests {
             width: 240.0,
             height: 120.0,
             balloon_contour: None,
+            balloon_silhouette: BalloonSilhouette::Elliptical,
             preferred_font: Some("Arial".to_owned()),
             font_families: vec!["Arial".to_owned()],
             font_weight: None,
@@ -464,6 +492,7 @@ mod tests {
             writing_mode: WritingMode::Horizontal,
             foreground_color: [0, 0, 0, 255],
             stroke: None,
+            outer_stroke: None,
             line_height: 1.2,
             letter_spacing: 0.0,
             word_spacing: 0.0,
@@ -564,5 +593,56 @@ mod tests {
             compiled.composition_commands(1).as_slice(),
             [CompositionCommand::Vector(_)]
         ));
+    }
+
+    #[test]
+    fn multi_pass_outer_and_inner_strokes_emit_three_ordered_glyph_runs() {
+        let font = FontSystem::new().first_font().unwrap();
+        let layout = TextLayout::new(&font)
+            .with_font_size(24.0)
+            .run("BAM!")
+            .unwrap();
+        let mut scene = PreparedScene::default();
+        let mut resources = Vec::new();
+        let options = TextRenderOptions {
+            color: [255, 220, 0, 255],
+            stroke: Some(StrokeOptions {
+                color: [255, 255, 255, 255],
+                width_px: 3.0,
+            }),
+            outer_stroke: Some(StrokeOptions {
+                color: [0, 0, 0, 255],
+                width_px: 2.0,
+            }),
+            ..TextRenderOptions::default()
+        };
+        TextRenderer::new().render(
+            &mut scene,
+            &mut resources,
+            &layout,
+            WritingMode::Horizontal,
+            &options,
+            Affine::IDENTITY,
+        );
+
+        let runs: Vec<&PreparedGlyphRun> = scene
+            .commands
+            .iter()
+            .filter_map(|command| match command {
+                PreparedSceneCommand::GlyphRun(run) => Some(run),
+                PreparedSceneCommand::FillPath(_) => None,
+            })
+            .collect();
+        assert_eq!(runs.len(), 3);
+        let synthetic_bold = if font.synthetic_bold() { 1.0 } else { 0.0 };
+        assert_eq!(runs[0].color, [0, 0, 0, 255]);
+        assert_eq!(runs[0].embolden, [synthetic_bold + 5.0; 2]);
+        assert!(!runs[0].hint);
+        assert_eq!(runs[1].color, [255, 255, 255, 255]);
+        assert_eq!(runs[1].embolden, [synthetic_bold + 3.0; 2]);
+        assert!(!runs[1].hint);
+        assert_eq!(runs[2].color, [255, 220, 0, 255]);
+        assert_eq!(runs[2].embolden, [synthetic_bold; 2]);
+        assert!(runs[2].hint);
     }
 }

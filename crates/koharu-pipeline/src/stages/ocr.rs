@@ -10,8 +10,8 @@ use koharu_ml::{
     paddle_ocr_vl::PaddleOCRVLTask, paddle_ocr_vl_quantized::PaddleOCRVLQuantized,
 };
 use koharu_scene::{
-    Authored, EntityId, Geometry, LanguageTag, OcrAnalysis, Origin, RecognizedFrom, Region,
-    RegionSpec, SourceText, TextDirection, TextRegion,
+    Authored, EntityId, Geometry, LanguageTag, OcrAnalysis, Origin, Presents, RecognizedFrom,
+    Region, RegionSpec, SourceText, TextDirection, TextLayout, TextRegion,
 };
 
 const PRODUCER: &str = "dev.koharu.pipeline.ocr";
@@ -90,55 +90,14 @@ impl Model {
     }
 
     async fn run(&self, input: StageInput) -> Result<koharu_scene::Patch> {
+        let page = input.page;
         let model_name = match self {
             Self::Manga(_) => "manga-ocr",
             Self::Baberu(_) => "baberu-ocr",
             Self::Hayai(_) => "hayai-ocr",
             Self::Paddle(_) => "paddleocr-vl-1.6",
         };
-        let page = input.page;
-        let mut targets = Vec::new();
-        let source = input
-            .images
-            .get(&input.scene, page, "source")
-            .await?
-            .ok_or_else(|| anyhow!("page {page} has no source image"))?;
-        for entity in input.scene.descendants(page)? {
-            let region = entity.id();
-            if !input.contains_entity(region)? {
-                continue;
-            }
-            let is_text_region = input
-                .scene
-                .component::<Region>(region)?
-                .is_some_and(|value| value.kind == TextRegion::kind());
-            if !is_text_region {
-                continue;
-            }
-            let geometry = input
-                .scene
-                .component::<Geometry>(region)?
-                .ok_or_else(|| anyhow!("text region {region} has no geometry"))?;
-            let crop = crop(&source, &geometry)
-                .with_context(|| format!("text region {region} is outside its source image"))?;
-            for relation in input.scene.relations_to_as::<RecognizedFrom>(region) {
-                let content = relation.value().source;
-                let previous = input.scene.component::<SourceText>(content)?;
-                if previous
-                    .as_ref()
-                    .is_some_and(|value| matches!(value.text.origin, Origin::User))
-                {
-                    continue;
-                }
-                targets.push(OcrTarget {
-                    content,
-                    region,
-                    geometry: geometry.clone(),
-                    previous,
-                    image: crop.clone(),
-                });
-            }
-        }
+        let targets = collect_ocr_targets(&input).await?;
 
         let results = match self {
             Self::Manga(model) => {
@@ -171,8 +130,15 @@ impl Model {
         let mut edit = input.scene.edit_as(generation.clone());
         edit.observe_assets(page)?;
         for result in &results {
-            edit.observe::<Region>(result.region)?;
-            edit.observe::<Geometry>(result.region)?;
+            if input.scene.component::<Region>(result.region)?.is_some() {
+                edit.observe::<Region>(result.region)?;
+            }
+            if input.scene.component::<Geometry>(result.region)?.is_some() {
+                edit.observe::<Geometry>(result.region)?;
+            }
+            if input.scene.component::<OcrAnalysis>(result.region)?.is_some() {
+                edit.observe::<OcrAnalysis>(result.region)?;
+            }
             edit.observe::<SourceText>(result.content)?;
         }
         for result in results {
@@ -266,6 +232,92 @@ fn normalize_ocr_text(text: String) -> String {
     }
 }
 
+async fn collect_ocr_targets(input: &StageInput) -> Result<Vec<OcrTarget>> {
+    let page = input.page;
+    let mut targets = Vec::new();
+    let source = input
+        .images
+        .get(&input.scene, page, "source")
+        .await?
+        .ok_or_else(|| anyhow!("page {page} has no source image"))?;
+    for entity in input.scene.descendants(page)? {
+        let region = entity.id();
+        if !input.contains_entity(region)? {
+            continue;
+        }
+        let is_text_region = input
+            .scene
+            .component::<Region>(region)?
+            .is_some_and(|value| value.kind == TextRegion::kind());
+        if !is_text_region {
+            continue;
+        }
+        let geometry = input
+            .scene
+            .component::<Geometry>(region)?
+            .ok_or_else(|| anyhow!("text region {region} has no geometry"))?;
+        let crop = crop(&source, &geometry)
+            .with_context(|| format!("text region {region} is outside its source image"))?;
+        for relation in input.scene.relations_to_as::<RecognizedFrom>(region) {
+            let content = relation.value().source;
+            let previous = input.scene.component::<SourceText>(content)?;
+            if previous
+                .as_ref()
+                .is_some_and(|value| matches!(value.text.origin, Origin::User))
+            {
+                continue;
+            }
+            targets.push(OcrTarget {
+                content,
+                region,
+                geometry: geometry.clone(),
+                previous,
+                image: crop.clone(),
+            });
+        }
+    }
+
+    let mut recognized_contents = targets
+        .iter()
+        .map(|t| t.content)
+        .collect::<std::collections::HashSet<_>>();
+    for entity in input.scene.descendants(page)? {
+        let layer_id = entity.id();
+        if !input.contains_entity(layer_id)? {
+            continue;
+        }
+        if entity.component::<TextLayout>()?.is_none() {
+            continue;
+        }
+        let Some(geometry) = crate::scope::resolve_geometry(&input.scene, layer_id)? else {
+            continue;
+        };
+        for relation in input.scene.relations_from_as::<Presents>(layer_id) {
+            let content = relation.value().target;
+            if !recognized_contents.insert(content) {
+                continue;
+            }
+            let previous = input.scene.component::<SourceText>(content)?;
+            if previous.as_ref().is_some_and(|val| {
+                matches!(val.text.origin, Origin::User) && !val.text.value.trim().is_empty()
+            }) {
+                continue;
+            }
+            let Ok(crop) = crop(&source, &geometry) else {
+                continue;
+            };
+            targets.push(OcrTarget {
+                content,
+                region: layer_id,
+                geometry: geometry.clone(),
+                previous,
+                image: crop,
+            });
+        }
+    }
+    Ok(targets)
+}
+
 fn crop(source: &DynamicImage, geometry: &Geometry) -> Result<DynamicImage> {
     let (min_x, min_y, max_x, max_y) =
         geometry_extents(geometry).ok_or_else(|| anyhow!("geometry is empty"))?;
@@ -281,7 +333,8 @@ fn crop(source: &DynamicImage, geometry: &Geometry) -> Result<DynamicImage> {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_ocr_text;
+    use std::sync::Arc;
+    use super::*;
 
     #[test]
     fn repeated_placeholder_glyphs_are_an_ellipsis() {
@@ -293,5 +346,81 @@ mod tests {
     fn ordinary_text_and_single_boxes_are_unchanged() {
         assert_eq!(normalize_ocr_text("待って…".to_owned()), "待って…");
         assert_eq!(normalize_ocr_text("☐".to_owned()), "☐");
+    }
+
+    #[tokio::test]
+    async fn manual_text_layers_without_text_region_are_targeted_for_ocr() {
+        let mut session = koharu_scene::Session::memory().await.unwrap();
+        let source = image::DynamicImage::new_rgb8(64, 64);
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        source.write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+        let png = Arc::<[u8]>::from(bytes.into_inner());
+
+        let mut page_id = None;
+        let mut content_id = None;
+        let mut layer_id = None;
+
+        let patch = session
+            .snapshot()
+            .patch(|edit| {
+                let p = edit.add_page(
+                    koharu_scene::PageDraft::new("page", 64.0, 64.0),
+                    koharu_scene::At::End,
+                )?;
+                edit.set_asset(
+                    p,
+                    &koharu_scene::AssetRole::new("source")?,
+                    koharu_scene::AssetInput::new(
+                        png,
+                        "image/png",
+                        koharu_scene::AssetMetadata {
+                            width: Some(64),
+                            height: Some(64),
+                            attributes: std::collections::BTreeMap::new(),
+                        },
+                    ),
+                )?;
+                let c = edit.add_text_content(p, koharu_scene::At::End)?;
+                let l = edit.add_text_layer(
+                    p,
+                    koharu_scene::At::End,
+                    c,
+                    &koharu_scene::TextLayout {
+                        origin: koharu_scene::Origin::User,
+                        kind: koharu_scene::TextLayoutKind::Paragraph,
+                        angle_degrees: None,
+                    },
+                )?;
+                edit.set(
+                    l,
+                    &koharu_scene::Geometry {
+                        origin: koharu_scene::Origin::User,
+                        points: vec![
+                            koharu_scene::Point { x: 10.0, y: 10.0 },
+                            koharu_scene::Point { x: 30.0, y: 10.0 },
+                            koharu_scene::Point { x: 30.0, y: 30.0 },
+                            koharu_scene::Point { x: 10.0, y: 30.0 },
+                        ],
+                    },
+                )?;
+                page_id = Some(p);
+                content_id = Some(c);
+                layer_id = Some(l);
+                Ok(())
+            })
+            .unwrap();
+        let snapshot = session.commit(patch).await.unwrap().snapshot;
+        let input = StageInput::new(
+            snapshot,
+            page_id.unwrap(),
+            None,
+            None,
+            Arc::new(crate::ImageCache::default()),
+            None,
+        );
+        let targets = collect_ocr_targets(&input).await.unwrap();
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].content, content_id.unwrap());
+        assert_eq!(targets[0].region, layer_id.unwrap());
     }
 }

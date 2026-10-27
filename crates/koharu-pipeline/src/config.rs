@@ -224,6 +224,22 @@ pub struct TranslationConfig {
     #[specta(type = String)]
     pub target_language: Language,
     pub instructions: Option<String>,
+    #[serde(default = "default_true")]
+    pub enable_personas: bool,
+    #[serde(default = "default_true")]
+    pub enable_speaker_tagging: bool,
+    #[serde(default = "default_context_window_pages")]
+    pub context_window_pages: u32,
+    #[serde(default)]
+    pub auto_guess_speakers: bool,
+}
+
+const fn default_true() -> bool {
+    true
+}
+
+const fn default_context_window_pages() -> u32 {
+    2
 }
 
 impl Default for TranslationConfig {
@@ -233,6 +249,10 @@ impl Default for TranslationConfig {
             generation: GenerationConfig::default(),
             target_language: Language::English,
             instructions: None,
+            enable_personas: true,
+            enable_speaker_tagging: true,
+            context_window_pages: 2,
+            auto_guess_speakers: false,
         }
     }
 }

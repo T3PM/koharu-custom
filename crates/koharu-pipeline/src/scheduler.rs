@@ -35,13 +35,26 @@ impl PageWork {
     }
 
     fn ready(&self, index: usize) -> bool {
-        let Some(prerequisite) = prerequisite(self.stages[index].stage) else {
-            return true;
-        };
-        self.stages
-            .iter()
-            .find(|work| work.stage == prerequisite)
-            .is_none_or(|work| work.state == WorkState::Finished)
+        let stage = self.stages[index].stage;
+        if stage != Stage::Detection {
+            if self
+                .stages
+                .iter()
+                .any(|work| work.stage == Stage::Detection && work.state != WorkState::Finished)
+            {
+                return false;
+            }
+        }
+        if stage == Stage::Translation {
+            if self
+                .stages
+                .iter()
+                .any(|work| work.stage == Stage::Ocr && work.state != WorkState::Finished)
+            {
+                return false;
+            }
+        }
+        true
     }
 }
 
@@ -148,14 +161,6 @@ impl Scheduler {
                 .find(|work| work.stage == stage)
                 .is_none_or(|work| work.state == WorkState::Finished)
         })
-    }
-}
-
-const fn prerequisite(stage: Stage) -> Option<Stage> {
-    match stage {
-        Stage::Detection => None,
-        Stage::Ocr | Stage::Inpainting => Some(Stage::Detection),
-        Stage::Translation => Some(Stage::Ocr),
     }
 }
 

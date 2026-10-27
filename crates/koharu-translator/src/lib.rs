@@ -5,6 +5,7 @@ mod error;
 mod language;
 mod local;
 mod model;
+pub mod onomatopoeia;
 mod prompt;
 mod provider;
 mod remote;
@@ -20,6 +21,7 @@ pub use backend::{TranslationContext, TranslationRequest};
 pub use language::Language;
 pub use model::{GenerationConfig, Model, ModelSelection, Quantization};
 pub(crate) use model::{ModelGeneration, QuantizationDefinition, display_name};
+pub use onomatopoeia::{OnomatopoeiaEntry, ONOMATOPOEIA_TABLE, lookup_onomatopoeia};
 pub use provider::{Provider, ProviderConfig, ProvidersConfig};
 
 #[derive(Clone)]

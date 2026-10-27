@@ -192,13 +192,55 @@ impl<'a> Execution<'a> {
         stage: Stage,
         patch: koharu_scene::Patch,
     ) -> std::result::Result<bool, PipelineError> {
+        let patch = match patch.rebase_on(&self.scene) {
+            Ok(patch) => patch,
+            Err(
+                koharu_scene::Error::PatchConflict(_)
+                | koharu_scene::Error::EntityNotFound(_)
+                | koharu_scene::Error::RelationNotFound(_),
+            ) => {
+                let pruned = patch.prune_missing(&self.scene);
+                if pruned.is_empty() {
+                    tracing::warn!(
+                        target: "koharu_metrics",
+                        stage = %stage,
+                        page = %page,
+                        "pipeline stage output was superseded by document changes"
+                    );
+                    return Ok(false);
+                }
+                match pruned.rebase_on(&self.scene) {
+                    Ok(rebased) => rebased,
+                    Err(error) => {
+                        tracing::warn!(
+                            target: "koharu_metrics",
+                            stage = %stage,
+                            page = %page,
+                            %error,
+                            "pruned pipeline stage output was superseded"
+                        );
+                        return Ok(false);
+                    }
+                }
+            }
+            Err(error) => {
+                return Err(PipelineError::new(
+                    ErrorKind::InvalidOutput,
+                    Some(stage),
+                    anyhow::Error::from(error)
+                        .context("failed to rebase stage output onto the latest scene"),
+                ));
+            }
+        };
+
+        if patch.is_empty() {
+            return Ok(false);
+        }
+
         let patch = patch
-            .rebase_on(&self.scene)
-            .and_then(|patch| {
-                patch.validate_on(&self.scene)?;
-                Ok(patch.with_label(format!("Pipeline {stage} for page {page}")))
-            })
-            .context("failed to rebase stage output onto the latest scene")
+            .validate_on(&self.scene)
+            .map(|()| patch.with_label(format!("Pipeline {stage} for page {page}")))
+            .context("failed to validate stage output on the latest scene")
             .map_err(|error| PipelineError::new(ErrorKind::InvalidOutput, Some(stage), error))?;
         if self.stopped() {
             return Ok(false);

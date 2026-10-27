@@ -162,12 +162,27 @@ struct LineBreakResult {
     cost: f32,
 }
 
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq)]
+pub enum BalloonSilhouette {
+    #[default]
+    Elliptical,
+    Rectangular,
+}
+
 #[derive(Clone, Debug)]
 struct ComicBalloon {
     width: f32,
     height: f32,
     contour: Vec<(f32, f32)>,
     minimum_air: f32,
+    silhouette: BalloonSilhouette,
+}
+
+impl ComicBalloon {
+    pub fn with_silhouette(mut self, silhouette: BalloonSilhouette) -> Self {
+        self.silhouette = silhouette;
+        self
+    }
 }
 
 #[derive(Clone)]
@@ -310,12 +325,24 @@ impl<'a> TextLayout<'a> {
         contour: Vec<(f32, f32)>,
         minimum_air: f32,
     ) -> Self {
+        let silhouette = self
+            .comic_balloon
+            .as_ref()
+            .map_or(BalloonSilhouette::Elliptical, |balloon| balloon.silhouette);
         self.comic_balloon = Some(ComicBalloon {
             width,
             height,
             contour,
             minimum_air: minimum_air.max(0.0),
+            silhouette,
         });
+        self
+    }
+
+    pub(crate) fn with_balloon_silhouette(mut self, silhouette: BalloonSilhouette) -> Self {
+        if let Some(balloon) = &mut self.comic_balloon {
+            *balloon = balloon.clone().with_silhouette(silhouette);
+        }
         self
     }
 
@@ -1598,16 +1625,29 @@ fn comic_line_breaks(
                     )
                     .into_iter()
                     .filter_map(move |profiles| {
-                        let result =
-                            exact_profiled_line_breaks(segments, profiles, allow_hyphenation)?;
-                        Some(result)
+                        exact_profiled_line_breaks(
+                            segments,
+                            profiles,
+                            allow_hyphenation,
+                            balloon.silhouette,
+                        )
                     })
             })
             .min_by(|left, right| {
                 left.overflowed
                     .cmp(&right.overflowed)
-                    .then_with(|| left.profiles.len().cmp(&right.profiles.len()))
+                    .then_with(|| {
+                        if balloon.silhouette == BalloonSilhouette::Elliptical
+                            && segments.len() >= 3
+                            && matches!((left.profiles.len(), right.profiles.len()), (2, 3) | (3, 2))
+                        {
+                            left.cost.total_cmp(&right.cost)
+                        } else {
+                            left.profiles.len().cmp(&right.profiles.len())
+                        }
+                    })
                     .then_with(|| left.cost.total_cmp(&right.cost))
+                    .then_with(|| left.profiles.len().cmp(&right.profiles.len()))
             })
     };
 
@@ -1633,6 +1673,7 @@ fn exact_profiled_line_breaks(
     segments: &[LineBreakMeasure],
     profiles: Vec<LineProfile>,
     allow_hyphenation: bool,
+    silhouette: BalloonSilhouette,
 ) -> Option<LineBreakResult> {
     let len = segments.len();
     let line_count = profiles.len();
@@ -1645,6 +1686,12 @@ fn exact_profiled_line_breaks(
 
     for line in 0..line_count {
         let remaining_lines = line_count - line - 1;
+        let equator_ratio = if silhouette == BalloonSilhouette::Elliptical && line_count >= 3 {
+            1.0 - 0.22
+                * ((2.0 * line as f32 + 1.0 - line_count as f32) / (line_count as f32 - 1.0)).abs()
+        } else {
+            1.0
+        };
         for start in line..len {
             if !dp[line][start].is_finite() {
                 continue;
@@ -1665,7 +1712,12 @@ fn exact_profiled_line_breaks(
                 let line_advance = advance - segments[end - 1].trailing_advance + suffix;
                 let width = profiles[line].width.max(1.0);
                 let overflow = (line_advance - width).max(0.0) / width;
-                let slack = (width - line_advance).max(0.0) / width;
+                let slack = if silhouette == BalloonSilhouette::Elliptical && line_count >= 3 {
+                    let target_width = (width * equator_ratio).max(1.0);
+                    (target_width - line_advance).abs() / target_width
+                } else {
+                    (width - line_advance).max(0.0) / width
+                };
                 let mut cost = dp[line][start]
                     + slack * slack * 1_000.0
                     + overflow * overflow * COMIC_LINE_OVERFLOW_PENALTY;
@@ -1679,7 +1731,7 @@ fn exact_profiled_line_breaks(
                     dp[line + 1][end] = cost;
                     previous[line + 1][end] = Some(start);
                 }
-                if segments[end - 1].is_mandatory || advance > width {
+                if segments[end - 1].is_mandatory || advance > width + 0.5 {
                     break;
                 }
             }
@@ -1929,7 +1981,24 @@ impl ComicBalloon {
         inline_air: f32,
     ) -> Option<(f32, f32)> {
         if self.contour.len() >= 3 {
-            return self.contour_inline_span(writing_mode, block, inline_air);
+            let (poly_left, poly_right) =
+                self.contour_inline_span(writing_mode, block, inline_air)?;
+            if self.silhouette == BalloonSilhouette::Rectangular {
+                return Some((poly_left, poly_right));
+            }
+            let polygon_span = poly_right - poly_left;
+            let block_radius = (block_extent * 0.5 - block_air).max(1.0);
+            let normalized_block = ((block - block_extent * 0.5) / block_radius).clamp(-1.0, 1.0);
+            let elliptical_span =
+                (inline_extent * (1.0 - normalized_block * normalized_block).sqrt() - inline_air)
+                    .max(0.0);
+            let clamped_span = polygon_span.min(elliptical_span.max(polygon_span * 0.72));
+            if clamped_span <= 0.0 {
+                return None;
+            }
+            let center = (poly_left + poly_right) * 0.5;
+            let half = clamped_span * 0.5;
+            return Some((center - half, center + half));
         }
 
         let block_radius = block_extent * 0.5 - block_air;
@@ -2164,6 +2233,7 @@ mod tests {
             height,
             contour,
             minimum_air,
+            silhouette: BalloonSilhouette::Elliptical,
         }
     }
 
@@ -2396,7 +2466,8 @@ mod tests {
             120.0,
             vec![(0.0, 0.0), (200.0, 0.0), (200.0, 120.0), (0.0, 120.0)],
             0.0,
-        );
+        )
+        .with_silhouette(BalloonSilhouette::Rectangular);
         let profiles = balloon
             .line_profiles(
                 WritingMode::Horizontal,
@@ -2554,6 +2625,7 @@ mod tests {
             height: 200.0,
             contour: vec![(0.0, 40.0), (100.0, 40.0), (100.0, 160.0), (0.0, 160.0)],
             minimum_air: 0.0,
+            silhouette: BalloonSilhouette::Elliptical,
         };
 
         let profiles = balloon
@@ -2581,6 +2653,7 @@ mod tests {
             height: 160.0,
             contour: vec![(0.0, 0.0), (100.0, 0.0), (100.0, 160.0), (48.0, 160.0)],
             minimum_air: 0.0,
+            silhouette: BalloonSilhouette::Elliptical,
         };
         let line_ink = InkBand {
             before: 5.0,
@@ -2609,6 +2682,7 @@ mod tests {
                 (0.0, 100.0),
             ],
             minimum_air: 0.0,
+            silhouette: BalloonSilhouette::Elliptical,
         };
 
         assert_eq!(
@@ -2624,6 +2698,7 @@ mod tests {
             height: 100.0,
             contour: vec![(50.0, 0.0), (100.0, 0.0), (100.0, 100.0), (50.0, 100.0)],
             minimum_air: 0.0,
+            silhouette: BalloonSilhouette::Elliptical,
         };
 
         assert_eq!(
@@ -2998,7 +3073,13 @@ mod tests {
             },
         ];
 
-        let result = exact_profiled_line_breaks(&segments, profiles, true).unwrap();
+        let result = exact_profiled_line_breaks(
+            &segments,
+            profiles,
+            true,
+            BalloonSilhouette::Elliptical,
+        )
+        .unwrap();
 
         assert_eq!(result.breaks, [1, 3]);
     }
@@ -3539,5 +3620,72 @@ mod tests {
             "expected line centres to match even with overflow, got c0={c0} c1={c1} (max_width={max_width})",
         );
         Ok(())
+    }
+
+    #[test]
+    fn diamond_shaping_tapers_first_and_last_lines_in_box_contour() -> anyhow::Result<()> {
+        let font = any_system_font();
+        let width = 160.0;
+        let height = 120.0;
+        let contour = vec![(0.0, 0.0), (width, 0.0), (width, height), (0.0, height)];
+        let balloon = comic_balloon(width, height, contour.clone(), 4.0)
+            .with_silhouette(BalloonSilhouette::Elliptical);
+        let profiles = balloon
+            .line_profiles(
+                WritingMode::Horizontal,
+                3,
+                20.0,
+                InkBand {
+                    before: 10.0,
+                    after: 10.0,
+                },
+                10.0,
+                10.0,
+            )
+            .unwrap();
+        assert!(profiles[0].width < profiles[1].width);
+        assert!(profiles[2].width < profiles[1].width);
+
+        let layout = TextLayout::new(&font)
+            .with_font_size(14.0)
+            .with_alignment(TextAlign::Center)
+            .with_max_width(width)
+            .with_max_height(height)
+            .with_comic_balloon(width, height, contour, 4.0)
+            .with_balloon_silhouette(BalloonSilhouette::Elliptical)
+            .run("We need to get out of this place right now")?;
+
+        assert_eq!(layout.lines.len(), 3);
+        assert!(layout.lines[0].advance < layout.lines[1].advance);
+        assert!(layout.lines[2].advance < layout.lines[1].advance);
+        Ok(())
+    }
+
+    #[test]
+    fn narration_silhouette_preserves_rectangular_chord_widths() {
+        let balloon = comic_balloon(
+            200.0,
+            120.0,
+            vec![(0.0, 0.0), (200.0, 0.0), (200.0, 120.0), (0.0, 120.0)],
+            0.0,
+        )
+        .with_silhouette(BalloonSilhouette::Rectangular);
+        let profiles = balloon
+            .line_profiles(
+                WritingMode::Horizontal,
+                5,
+                16.0,
+                InkBand {
+                    before: 8.0,
+                    after: 8.0,
+                },
+                10.0,
+                10.0,
+            )
+            .unwrap();
+
+        for profile in profiles {
+            assert_approx_eq(profile.width, 180.0);
+        }
     }
 }

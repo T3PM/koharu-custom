@@ -16,7 +16,7 @@ pub struct Store;
 impl Store {
     /// Selects the store before the first artifact or runtime is resolved.
     pub fn configure(root: impl Into<PathBuf>) -> Result<()> {
-        let requested = root.into();
+        let requested = dunce::simplified(&root.into()).to_path_buf();
         ensure!(
             requested.is_absolute(),
             "runtime store must be absolute: {}",
@@ -50,16 +50,17 @@ impl Store {
     pub fn root() -> &'static Path {
         ROOT.get_or_init(|| {
             if let Ok(root) = std::env::var("KOHARU_STORE_DIR") {
-                return PathBuf::from(root);
+                return dunce::simplified(&PathBuf::from(root)).to_path_buf();
             }
             let subfolder = match std::env::var("KOHARU_PROFILE") {
                 Ok(profile) if !profile.trim().is_empty() => format!("koharu-{}", profile.trim()),
                 _ => "koharu".to_string(),
             };
-            dirs::cache_dir()
+            let path = dirs::cache_dir()
                 .unwrap_or_else(std::env::temp_dir)
                 .join(subfolder)
-                .join("packages")
+                .join("packages");
+            dunce::simplified(&path).to_path_buf()
         })
     }
 

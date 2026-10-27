@@ -10,11 +10,11 @@ use arc_swap::ArcSwap;
 use futures::future::try_join_all;
 use koharu_rasterizer::{RasterOptions, Rasterizer};
 use koharu_scene::{
-    Asset, AssetRole, BlobId, Change, Component, ComponentOwner, EntityChange, EntityId, FitsTo,
-    FlowsIn, Geometry, Group, OcrAnalysis, Origin, Page, Presents, RasterLayer, RasterLayerKind,
-    RecognizedFrom, Region, RelationChange, RelationId, RelationSpec, Revision, Snapshot,
-    TextAlignment, TextDirection, TextLayout as SceneTextLayout, TextLayoutKind, Translation,
-    Typography, Visibility,
+    Asset, AssetRole, BalloonClassification, BalloonShape, BlobId, Change, Component,
+    ComponentOwner, EntityChange, EntityId, FitsTo, FlowsIn, Geometry, Group, OcrAnalysis, Origin,
+    Page, Presents, RasterLayer, RasterLayerKind, RecognizedFrom, Region, RelationChange,
+    RelationId, RelationSpec, Revision, Snapshot, TextAlignment, TextDirection,
+    TextLayout as SceneTextLayout, TextLayoutKind, TextRole, Translation, Typography, Visibility,
 };
 use parking_lot::Mutex;
 use rayon::prelude::*;
@@ -31,9 +31,9 @@ use vello::{
 };
 
 use crate::{
-    Error, FontFamily, FontStyle, Frame, ImageKind, ImageMetadata, Layer, LayerKind, Presentation,
-    RasterImage, RenderBounds, RenderDependency, RenderDiagnostic, Result, RetentionStats,
-    TextAlign, TextMetadata, TypesettingConfig, WritingMode,
+    BalloonSilhouette, Error, FontFamily, FontStyle, Frame, ImageKind, ImageMetadata, Layer,
+    LayerKind, Presentation, RasterImage, RenderBounds, RenderDependency, RenderDiagnostic, Result,
+    RetentionStats, TextAlign, TextMetadata, TypesettingConfig, TypesettingPreset, WritingMode,
     bubble::{GeometryFrame, LayoutBox, contour, flow_cells, geometry_bounds, geometry_frame},
     fonts::{FontPreview, FontRequest, Fonts},
     frame::{
@@ -496,6 +496,7 @@ impl Renderer {
         let mut traversal = Traversal {
             snapshot,
             page,
+            typesetting: &typesetting,
             width,
             height,
             source_role: &source_role,
@@ -570,6 +571,7 @@ impl Renderer {
 struct Traversal<'a> {
     snapshot: &'a Snapshot,
     page: EntityId,
+    typesetting: &'a TypesettingConfig,
     width: u32,
     height: u32,
     source_role: &'a AssetRole,
@@ -726,6 +728,7 @@ impl Traversal<'_> {
         let content = presents.value().target;
         dependencies.insert(RenderDependency::Entity(content));
         dependencies.insert(component_dependency::<Translation>(content));
+        dependencies.insert(component_dependency::<TextRole>(content));
         dependencies.insert(RenderDependency::RelationQuery {
             source: content,
             kind: RecognizedFrom::KIND.to_owned(),
@@ -766,6 +769,23 @@ impl Traversal<'_> {
             )
         };
         let typography = self.snapshot.component::<Typography>(entity)?;
+        let classification = if let Some(classification) = self.snapshot.component::<BalloonClassification>(entity)? {
+            dependencies.insert(component_dependency::<BalloonClassification>(entity));
+            Some(classification)
+        } else if let Some(flows) = self.snapshot.relation_from::<FlowsIn>(entity)? {
+            let bubble = flows.value().target;
+            dependencies.insert(component_dependency::<BalloonClassification>(bubble));
+            self.snapshot.component::<BalloonClassification>(bubble)?
+        } else {
+            None
+        };
+        let preset = classification
+            .as_ref()
+            .map(|c| self.typesetting.preset_for_shape(c.shape));
+        let balloon_silhouette = match classification.as_ref().map(|c| c.shape) {
+            Some(BalloonShape::Narration) => BalloonSilhouette::Rectangular,
+            _ => BalloonSilhouette::Elliptical,
+        };
         let analysis =
             if let Some(recognized) = self.snapshot.relation_from::<RecognizedFrom>(content)? {
                 dependencies.insert(RenderDependency::Relation(recognized.id()));
@@ -786,14 +806,53 @@ impl Traversal<'_> {
             writing_mode,
             direction == harfrust::Direction::RightToLeft,
         );
+        let is_user_typography = typography
+            .as_ref()
+            .is_some_and(|value| matches!(value.origin, Origin::User));
+        let is_sfx = self
+            .snapshot
+            .component::<TextRole>(content)?
+            .is_some_and(|role| role.role == "dev.koharu.text.sfx");
         let preferred_font = typography
             .as_ref()
-            .and_then(|value| value.preferred_font.clone());
+            .and_then(|value| value.preferred_font.clone())
+            .or_else(|| {
+                if !is_user_typography && is_sfx {
+                    self.typesetting
+                        .sfx_font
+                        .as_ref()
+                        .map(|s| s.trim())
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_owned)
+                } else {
+                    None
+                }
+            })
+            .or_else(|| preset.as_ref().and_then(|p| p.font_family.clone()));
         let font_families = self.font_families.to_vec();
         for family in preferred_font.iter().chain(font_families.iter()) {
             dependencies.insert(RenderDependency::Font(family.clone()));
         }
         let is_bubble = balloon_contour.is_some();
+        let font_weight = resolve_font_weight(
+            typography.as_ref().and_then(|value| value.font_weight),
+            self.typesetting.font_weight,
+            preset.as_ref().and_then(|value| value.font_weight),
+            is_user_typography,
+        );
+        let font_style = typography
+            .as_ref()
+            .and_then(|value| value.font_style)
+            .map(Into::into)
+            .or_else(|| preset.as_ref().and_then(|p| p.font_style).map(Into::into));
+        let base_font_size = typography
+            .as_ref()
+            .and_then(|value| value.size)
+            .or_else(|| self.typesetting.font_size.map(|size| size as f32));
+        let font_size = match (base_font_size, preset.as_ref(), is_user_typography) {
+            (Some(size), Some(preset), false) => Some(size * preset.size_scale),
+            (size, _, _) => size,
+        };
         let descriptor = TextNodeDescriptor {
             entity,
             text: text.clone(),
@@ -801,14 +860,12 @@ impl Traversal<'_> {
             width: frame.bounds.width,
             height: frame.bounds.height,
             balloon_contour,
+            balloon_silhouette,
             preferred_font,
             font_families,
-            font_weight: typography.as_ref().and_then(|value| value.font_weight),
-            font_style: typography
-                .as_ref()
-                .and_then(|value| value.font_style)
-                .map(Into::into),
-            font_size: typography.as_ref().and_then(|value| value.size),
+            font_weight,
+            font_style,
+            font_size,
             minimum_font_size: MINIMUM_FONT_SIZE,
             auto_fit: typography.as_ref().is_none_or(|value| value.auto_fit),
             alignment,
@@ -817,7 +874,11 @@ impl Traversal<'_> {
                 .as_ref()
                 .and_then(|value| value.color)
                 .unwrap_or([0, 0, 0, 255]),
-            stroke: resolve_stroke(typography.as_ref()),
+            stroke: resolve_stroke(typography.as_ref(), preset.as_ref()),
+            outer_stroke: typography
+                .as_ref()
+                .and_then(|t| t.outer_stroke())
+                .map(|(color, width_px)| StrokeOptions { color, width_px }),
             line_height: 1.2,
             letter_spacing: 0.0,
             word_spacing: 0.0,
@@ -1453,13 +1514,56 @@ fn resolve_alignment(
     }
 }
 
-fn resolve_stroke(typography: Option<&Typography>) -> Option<StrokeOptions> {
-    let typography = typography?;
-    let width_px = typography.stroke_width.filter(|width| *width > 0.0)?;
-    Some(StrokeOptions {
-        color: typography.stroke_color.unwrap_or([u8::MAX; 4]),
-        width_px,
-    })
+fn resolve_font_weight(
+    layer_weight: Option<u16>,
+    configured_default: Option<u16>,
+    preset_weight: Option<u16>,
+    is_user_typography: bool,
+) -> Option<u16> {
+    if is_user_typography {
+        layer_weight.or(configured_default).or(preset_weight)
+    } else {
+        configured_default.or(preset_weight).or(layer_weight)
+    }
+}
+
+fn resolve_stroke(
+    typography: Option<&Typography>,
+    preset: Option<&TypesettingPreset>,
+) -> Option<StrokeOptions> {
+    let default_stroke_color = || {
+        let fill = typography
+            .and_then(|t| t.color)
+            .unwrap_or([0, 0, 0, 255]);
+        let luma = (77 * u32::from(fill[0])
+            + 150 * u32::from(fill[1])
+            + 29 * u32::from(fill[2]))
+            >> 8;
+        if luma > 128 {
+            [0, 0, 0, 255]
+        } else {
+            [255, 255, 255, 255]
+        }
+    };
+    if let Some(typography) = typography {
+        if let Some(width_px) = typography.stroke_width.filter(|width| *width > 0.0) {
+            return Some(StrokeOptions {
+                color: typography.stroke_color.unwrap_or_else(default_stroke_color),
+                width_px,
+            });
+        }
+    }
+    if let Some(preset) = preset {
+        if let Some(width_px) = preset.stroke_width.filter(|width| *width > 0.0) {
+            return Some(StrokeOptions {
+                color: typography
+                    .and_then(|t| t.stroke_color)
+                    .unwrap_or_else(default_stroke_color),
+                width_px,
+            });
+        }
+    }
+    None
 }
 
 struct CachedNode {
@@ -1704,6 +1808,79 @@ mod tests {
         assert_eq!(
             resolve_alignment(None, WritingMode::Horizontal, false),
             TextAlign::Center
+        );
+    }
+
+    #[test]
+    fn font_weight_settings_update_generated_text_and_keep_user_overrides() {
+        assert_eq!(
+            resolve_font_weight(None, Some(600), Some(700), false),
+            Some(600)
+        );
+        assert_eq!(
+            resolve_font_weight(Some(300), Some(600), Some(700), false),
+            Some(600)
+        );
+        assert_eq!(
+            resolve_font_weight(Some(900), Some(600), Some(700), true),
+            Some(900)
+        );
+        assert_eq!(resolve_font_weight(None, None, Some(700), false), Some(700));
+    }
+
+    #[test]
+    fn resolve_stroke_contrasts_with_fill_luminance_when_stroke_color_is_omitted() {
+        let dark_fill = Typography {
+            origin: koharu_scene::Origin::User,
+            preferred_font: None,
+            font_weight: None,
+            font_style: None,
+            size: None,
+            auto_fit: true,
+            color: Some([20, 20, 20, 255]),
+            stroke_color: None,
+            stroke_width: Some(2.0),
+            alignment: None,
+            writing_mode: None,
+            extensions: BTreeMap::new(),
+        };
+        assert_eq!(
+            resolve_stroke(Some(&dark_fill), None),
+            Some(StrokeOptions {
+                color: [255, 255, 255, 255],
+                width_px: 2.0,
+            })
+        );
+
+        let light_fill = Typography {
+            color: Some([240, 240, 240, 255]),
+            ..dark_fill.clone()
+        };
+        assert_eq!(
+            resolve_stroke(Some(&light_fill), None),
+            Some(StrokeOptions {
+                color: [0, 0, 0, 255],
+                width_px: 2.0,
+            })
+        );
+
+        let preset = TypesettingPreset {
+            font_family: None,
+            font_weight: None,
+            font_style: None,
+            size_scale: 1.0,
+            stroke_width: Some(3.0),
+        };
+        let light_no_stroke_width = Typography {
+            stroke_width: None,
+            ..light_fill
+        };
+        assert_eq!(
+            resolve_stroke(Some(&light_no_stroke_width), Some(&preset)),
+            Some(StrokeOptions {
+                color: [0, 0, 0, 255],
+                width_px: 3.0,
+            })
         );
     }
 

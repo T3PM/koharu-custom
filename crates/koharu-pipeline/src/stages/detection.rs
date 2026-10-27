@@ -22,10 +22,11 @@ use koharu_ml::koharu_layout_rfdetr_seg_2xl::{
     KoharuLayoutThresholds,
 };
 use koharu_scene::{
-    AssetInput, AssetMetadata, AssetRole, At, BubbleRegion, DetectionAnalysis, DetectionLabel,
-    EntityId, EntityOrigin, FitsTo, FlowsIn, Generation, Geometry, Inside, Origin, PanelRegion,
-    Point, RecognizedFrom, Region, RegionKind, RegionSpec, RemovePolicy, TextLayout,
-    TextLayoutKind, TextRegion, TextRole, Typography, WritingMode,
+    AssetInput, AssetMetadata, AssetRole, At, BalloonClassification, BalloonShape, BubbleRegion,
+    DetectionAnalysis, DetectionLabel, EntityId, EntityOrigin, FitsTo, FlowsIn,
+    Generation, Geometry, Inside, Origin, PanelRegion, Point, Presents, RecognizedFrom, Region,
+    RegionKind, RegionSpec, RemovePolicy, SourceText, TextLayout, TextLayoutKind, TextRegion,
+    TextRole, Translation, Typography, WritingMode,
 };
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -47,7 +48,20 @@ const COLOR_CLUSTER_MIN_DISTANCE_SQUARED: u32 = 32 * 32;
 const COLOR_CLUSTER_COUNT: usize = 4;
 const MIN_EXTREME_COLOR_PIXELS: u32 = 4;
 const MIN_MEASURED_STROKE_WIDTH: u8 = 2;
+const HALO_INNER_DILATE_RADIUS: u32 = 1;
+const HALO_OUTER_DILATE_RADIUS: u32 = 5;
+const HALO_HIGH_VARIANCE_IQR: u8 = 40;
+const HALO_LOW_CONTRAST_LUMA_DELTA: u8 = 96;
 const DIALOGUE_MASK_CONTAINMENT_THRESHOLD: f32 = 0.9;
+const FALLBACK_BALLOON_SHAPE: BalloonShape = BalloonShape::NormalSpeech;
+const FALLBACK_BALLOON_CONFIDENCE: f32 = 0.5;
+const NARRATION_RECTANGULARITY_THRESHOLD: f64 = 0.88;
+const SHOUT_SOLIDITY_THRESHOLD: f64 = 0.85;
+const SHOUT_CIRCULARITY_THRESHOLD: f64 = 0.55;
+const THOUGHT_SOLIDITY_THRESHOLD: f64 = 0.92;
+const THOUGHT_CIRCULARITY_THRESHOLD: f64 = 0.72;
+const WHISPER_ROUGHNESS_THRESHOLD: f64 = 1.035;
+const WHISPER_SOLIDITY_THRESHOLD: f64 = 0.88;
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, Type)]
 #[serde(default)]
@@ -99,22 +113,26 @@ impl StageProcessor for Processor {
         MODEL_NAME
     }
 
+    fn unload(&self) -> bool {
+        self.model.unload()
+    }
+
     fn skip(&self, input: &StageInput) -> Result<bool> {
+        if input.region.is_some() {
+            return Ok(false);
+        }
         for entity in input.scene.descendants(input.page)? {
             let id = entity.id();
             if input.contains_entity(id)?
-                && entity
+                && (entity
                     .component::<Region>()?
                     .is_some_and(|region| region.kind == TextRegion::kind())
+                    || entity.component::<TextLayout>()?.is_some())
             {
                 return Ok(true);
             }
         }
         Ok(false)
-    }
-
-    fn unload(&self) -> bool {
-        self.model.unload()
     }
 
     async fn load(&self) -> Result<()> {
@@ -181,6 +199,8 @@ struct DetectedRegion<'a> {
     entity: EntityId,
     mask: &'a KoharuLayoutMask,
     area: u32,
+    shape: BalloonShape,
+    confidence: f32,
 }
 
 struct DetectedText<'a> {
@@ -232,7 +252,8 @@ fn remove_previous_regions(
     edit: &mut koharu_scene::Edit,
     generation: &Generation,
 ) -> Result<()> {
-    let mut remove = Vec::new();
+    let mut remove_regions = Vec::new();
+    let mut remove_texts = Vec::new();
     for entity in input.scene.descendants(input.page)? {
         let id = entity.id();
         if !input.contains_entity(id)? {
@@ -245,10 +266,92 @@ fn remove_previous_regions(
             })
             && entity.component::<Region>()?.is_some();
         if owned_region {
-            remove.push(id);
+            let mut region_has_preserved_content = false;
+            for relation in input.scene.relations_to_as::<RecognizedFrom>(id) {
+                let content_id = relation.value().source;
+                let content_generated = input
+                    .scene
+                    .component::<EntityOrigin>(content_id)?
+                    .is_some_and(|origin| {
+                        matches!(origin.origin, Origin::Generated(ref owner) if owner.producer == generation.producer)
+                    });
+                let has_translation = input
+                    .scene
+                    .component::<Translation>(content_id)?
+                    .is_some();
+                let has_user_edits = input
+                    .scene
+                    .component::<SourceText>(content_id)?
+                    .is_some_and(|s| matches!(s.text.origin, Origin::User))
+                    || input
+                        .scene
+                        .component::<Translation>(content_id)?
+                        .is_some_and(|t| matches!(t.text.origin, Origin::User))
+                    || input
+                        .scene
+                        .component::<TextRole>(content_id)?
+                        .is_some_and(|r| matches!(r.origin, Origin::User));
+
+                if has_translation || has_user_edits {
+                    region_has_preserved_content = true;
+                } else if content_generated {
+                    for pres in input.scene.relations_to_as::<Presents>(content_id) {
+                        let layer_id = pres.value().source;
+                        let layer_generated = input
+                            .scene
+                            .component::<EntityOrigin>(layer_id)?
+                            .is_some_and(|origin| {
+                                matches!(origin.origin, Origin::Generated(ref owner) if owner.producer == generation.producer)
+                            });
+                        if layer_generated {
+                            remove_texts.push(layer_id);
+                        }
+                    }
+                    remove_texts.push(content_id);
+                }
+            }
+            let is_bubble = entity
+                .component::<Region>()?
+                .is_some_and(|r| r.label.as_deref() == Some("bubble"));
+            if is_bubble && !region_has_preserved_content {
+                for flows in input.scene.relations_to_as::<FlowsIn>(id) {
+                    let layer_id = flows.value().source;
+                    if let Some(presents) = input.scene.relation_from::<Presents>(layer_id)? {
+                        let content_id = presents.value().target;
+                        let has_translation = input
+                            .scene
+                            .component::<Translation>(content_id)?
+                            .is_some();
+                        let has_user_edits = input
+                            .scene
+                            .component::<SourceText>(content_id)?
+                            .is_some_and(|s| matches!(s.text.origin, Origin::User))
+                            || input
+                                .scene
+                                .component::<Translation>(content_id)?
+                                .is_some_and(|t| matches!(t.text.origin, Origin::User))
+                            || input
+                                .scene
+                                .component::<TextRole>(content_id)?
+                                .is_some_and(|r| matches!(r.origin, Origin::User));
+                        if has_translation || has_user_edits {
+                            region_has_preserved_content = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            if !region_has_preserved_content {
+                remove_regions.push(id);
+            }
         }
     }
-    for entity in remove {
+    for entity in remove_texts {
+        if input.scene.entity(entity).is_ok() {
+            edit.remove_entity(entity, RemovePolicy::Cascade)?;
+        }
+    }
+    for entity in remove_regions {
         if input.scene.entity(entity).is_ok() {
             edit.remove_entity(entity, RemovePolicy::Cascade)?;
         }
@@ -276,17 +379,75 @@ async fn write_page(
     if let Some(region) = input.region {
         detections.retain(|detection| intersects(detection.bbox, region));
     }
+    let mut user_boxes = Vec::new();
+    for entity in input.scene.descendants(page)? {
+        let id = entity.id();
+        if !input.contains_entity(id)? {
+            continue;
+        }
+        let is_user = entity
+            .component::<EntityOrigin>()?
+            .is_some_and(|o| matches!(o.origin, Origin::User))
+            || entity
+                .component::<TextLayout>()?
+                .is_some_and(|l| matches!(l.origin, Origin::User))
+            || entity
+                .component::<Region>()?
+                .is_some_and(|r| matches!(r.origin, Origin::User));
+        let is_preserved_text = is_preserved_text_layer(&input.scene, id)?;
+        if is_user || is_preserved_text {
+            if let Some(geo) = crate::scope::resolve_geometry(&input.scene, id)? {
+                if let Some((min_x, min_y, max_x, max_y)) = crate::scope::geometry_extents(&geo) {
+                    user_boxes.push([min_x as f32, min_y as f32, max_x as f32, max_y as f32]);
+                }
+            }
+        }
+    }
+    if !user_boxes.is_empty() {
+        detections.retain(|detection| {
+            if detection.label != "text" {
+                return true;
+            }
+            !user_boxes.iter().any(|u| {
+                intersection_over_union(detection.bbox, *u) >= 0.4
+                    || (area(*u) > 0.0 && intersection_area(detection.bbox, *u) / area(*u) >= 0.5)
+            })
+        });
+    }
     non_maximum_suppression(&mut detections, 0.5);
     sort_by_layout(&mut detections);
 
     let image = image.to_rgb8();
     let regions = write_regions(&input.scene, edit, page, &image, &detections, generation)
         .context("failed to write detected regions")?;
-    link_dialogue_regions(edit, &regions, generation)
+    link_dialogue_regions(edit, &regions, Some(&image), generation)
         .context("failed to associate detected text with dialogue regions")?;
     write_masks(input, edit, page, &detections, size)
         .await
         .context("failed to write detection masks")
+}
+
+fn is_preserved_text_layer(scene: &koharu_scene::Snapshot, id: EntityId) -> Result<bool> {
+    if scene.component::<TextLayout>(id)?.is_none() {
+        return Ok(false);
+    }
+    if scene
+        .component::<EntityOrigin>(id)?
+        .is_some_and(|o| matches!(o.origin, Origin::User))
+    {
+        return Ok(true);
+    }
+    let Some(relation) = scene.relation_from::<Presents>(id)? else {
+        return Ok(false);
+    };
+    let target = relation.value().target;
+    Ok(scene.component::<Translation>(target)?.is_some()
+        || scene
+            .component::<SourceText>(target)?
+            .is_some_and(|s| matches!(s.text.origin, Origin::User))
+        || scene
+            .component::<TextRole>(target)?
+            .is_some_and(|r| matches!(r.origin, Origin::User)))
 }
 
 fn write_regions<'a>(
@@ -344,16 +505,36 @@ fn write_region<'a>(
         .add_entity(page, At::End)
         .context("failed to create a detected region")?;
     let kind = region_kind(&detection.label)?;
-    let geometry = if detection.label == "bubble" {
-        mask_geometry(&detection.mask).unwrap_or_else(|| rectangle_geometry(detection.bbox))
+    let (geometry, shape, shape_conf) = if detection.label == "bubble" {
+        if let Some(geo) = mask_geometry(&detection.mask) {
+            let (shape, conf) = classify_balloon_shape(&geo, detection.bbox);
+            (geo, shape, conf)
+        } else {
+            (
+                rectangle_geometry(detection.bbox),
+                FALLBACK_BALLOON_SHAPE,
+                FALLBACK_BALLOON_CONFIDENCE,
+            )
+        }
     } else if detection.label == "text" {
-        inferred.map_or_else(
+        let geo = inferred.map_or_else(
             || rectangle_geometry(detection.bbox),
             |typography| rotated_rectangle_geometry(detection.bbox, typography.angle_degrees),
+        );
+        (
+            geo,
+            FALLBACK_BALLOON_SHAPE,
+            FALLBACK_BALLOON_CONFIDENCE,
         )
     } else {
-        rectangle_geometry(detection.bbox)
+        (
+            rectangle_geometry(detection.bbox),
+            FALLBACK_BALLOON_SHAPE,
+            FALLBACK_BALLOON_CONFIDENCE,
+        )
     };
+    let mut geometry = geometry;
+    geometry.origin = Origin::Generated(generation.clone());
     edit.set(entity, &geometry)
         .context("failed to set detected region geometry")?;
     edit.set(
@@ -376,12 +557,25 @@ fn write_region<'a>(
         },
     )
     .context("failed to set detection analysis")?;
+
+    if detection.label == "bubble" {
+        edit.set(
+            entity,
+            &BalloonClassification {
+                origin: Origin::Generated(generation.clone()),
+                shape,
+                confidence: shape_conf,
+            },
+        )?;
+    }
     if detection.label != "text" {
         return Ok(if detection.label == "bubble" {
             RegionOutput::Bubble(DetectedRegion {
                 entity,
                 mask: &detection.mask,
                 area: detection.area,
+                shape,
+                confidence: shape_conf,
             })
         } else {
             RegionOutput::Other
@@ -401,22 +595,29 @@ fn write_region<'a>(
     )?;
     write_text_role(edit, content, "dev.koharu.text.free-text", generation)
         .context("failed to set the detected text role")?;
-    let (preferred_font, default_font_size, default_font_weight) =
-        resolve_typesetting_defaults("dev.koharu.text.free-text");
+    let stroke_width = inferred.and_then(|value| value.stroke_width);
+    let stroke_color = inferred
+        .and_then(|value| value.stroke_color)
+        .map(|color| [color[0], color[1], color[2], u8::MAX])
+        .or_else(|| {
+            if stroke_width.is_some() {
+                Some([u8::MAX, u8::MAX, u8::MAX, u8::MAX])
+            } else {
+                None
+            }
+        });
     edit.set(
         layer,
         &Typography {
             origin: Origin::Generated(generation.clone()),
-            preferred_font,
-            font_weight: default_font_weight,
+            preferred_font: None,
+            font_weight: None,
             font_style: None,
-            size: default_font_size,
-            auto_fit: default_font_size.is_none(),
+            size: None,
+            auto_fit: true,
             color: inferred.map(|value| [value.color[0], value.color[1], value.color[2], u8::MAX]),
-            stroke_color: inferred
-                .and_then(|value| value.stroke_color)
-                .map(|color| [color[0], color[1], color[2], u8::MAX]),
-            stroke_width: inferred.and_then(|value| value.stroke_width),
+            stroke_color,
+            stroke_width,
             alignment: None,
             writing_mode: inferred.map(|value| value.writing_mode),
             extensions: Default::default(),
@@ -436,73 +637,244 @@ fn write_region<'a>(
     }))
 }
 
-fn resolve_typesetting_defaults(role: &str) -> (Option<String>, Option<f32>, Option<u16>) {
-    let Ok(config) = koharu_renderer::TypesettingConfig::load() else {
-        return (None, None, None);
-    };
-    let Ok(read) = config.read() else {
-        return (None, None, None);
-    };
-    let role_font = if role.contains("dialogue") {
-        read.dialogue_font.as_ref()
-    } else if role.contains("sfx") || role.contains("onomatopoeia") {
-        read.sfx_font.as_ref()
-    } else if role.contains("narration") || role.contains("free-text") {
-        read.narration_font.as_ref()
-    } else {
-        None
-    };
-    let font = role_font
-        .filter(|font| !font.trim().is_empty())
-        .cloned()
-        .or_else(|| read.font_families.first().cloned());
-    let font_size = read.font_size.map(|s| s as f32);
-    let font_weight = read.font_weight;
-    (font, font_size, font_weight)
-}
-
 fn link_dialogue_regions(
     edit: &mut koharu_scene::Edit,
     regions: &PageRegions<'_>,
+    image: Option<&RgbImage>,
     generation: &Generation,
 ) -> Result<()> {
     for text in &regions.texts {
         let bubble = containing_bubble(&regions.bubbles, text);
-        let role = if bubble.is_some() {
-            "dev.koharu.text.dialogue"
-        } else {
-            "dev.koharu.text.free-text"
-        };
         if let Some(bubble) = bubble {
             edit.relate::<Inside>(text.entity, bubble.entity)?;
             edit.relate::<FlowsIn>(text.layer, bubble.entity)?;
             write_text_role(edit, text.content, "dev.koharu.text.dialogue", generation)?;
+            edit.set(
+                text.layer,
+                &BalloonClassification {
+                    origin: Origin::Generated(generation.clone()),
+                    shape: bubble.shape,
+                    confidence: bubble.confidence,
+                },
+            )?;
         } else {
+            let is_sfx = text
+                .inferred
+                .as_ref()
+                .and_then(|inf| inf.stroke_width)
+                .is_some_and(|w| w >= MIN_MEASURED_STROKE_WIDTH as f32);
+            let role = if is_sfx {
+                "dev.koharu.text.sfx"
+            } else {
+                "dev.koharu.text.free-text"
+            };
             edit.relate::<FitsTo>(text.layer, text.entity)?;
+            write_text_role(edit, text.content, role, generation)?;
+            if text.inferred.and_then(|inf| inf.stroke_width).is_none()
+                && let Some(image) = image
+            {
+                let halo_samples = sample_text_halo_pixels(image, text.mask, text.bounds);
+                let fill_rgb = text.inferred.map_or([0, 0, 0], |inf| inf.color);
+                let fill_color = [fill_rgb[0], fill_rgb[1], fill_rgb[2], u8::MAX];
+                let font_size = estimated_font_size(text.bounds, text.inferred);
+                let (stroke_color, stroke_width, outer_stroke) =
+                    synthesize_halo_stroke(fill_color, &halo_samples, font_size);
+                let mut typography = Typography {
+                    origin: Origin::Generated(generation.clone()),
+                    preferred_font: None,
+                    font_weight: None,
+                    font_style: None,
+                    size: None,
+                    auto_fit: true,
+                    color: text
+                        .inferred
+                        .map(|value| [value.color[0], value.color[1], value.color[2], u8::MAX]),
+                    stroke_color,
+                    stroke_width,
+                    alignment: None,
+                    writing_mode: text.inferred.map(|value| value.writing_mode),
+                    extensions: Default::default(),
+                };
+                typography.set_outer_stroke(outer_stroke);
+                edit.set(text.layer, &typography)?;
+            }
         }
-        let (preferred_font, default_font_size, default_font_weight) =
-            resolve_typesetting_defaults(role);
-        edit.set(
-            text.layer,
-            &Typography {
-                origin: Origin::Generated(generation.clone()),
-                preferred_font,
-                font_weight: default_font_weight,
-                font_style: None,
-                size: default_font_size,
-                auto_fit: default_font_size.is_none(),
-                color: text.inferred.map(|value| [value.color[0], value.color[1], value.color[2], u8::MAX]),
-                stroke_color: text.inferred
-                    .and_then(|value| value.stroke_color)
-                    .map(|color| [color[0], color[1], color[2], u8::MAX]),
-                stroke_width: text.inferred.and_then(|value| value.stroke_width),
-                alignment: None,
-                writing_mode: text.inferred.map(|value| value.writing_mode),
-                extensions: Default::default(),
-            },
-        )?;
     }
     Ok(())
+}
+
+fn estimated_font_size([left, top, right, bottom]: [f32; 4], inferred: Option<InferredTypography>) -> f32 {
+    let width = (right - left).max(1.0);
+    let height = (bottom - top).max(1.0);
+    let extent = match inferred.map(|value| value.writing_mode) {
+        Some(WritingMode::Vertical) => width,
+        Some(WritingMode::Horizontal) => height,
+        None => width.min(height),
+    };
+    extent.clamp(12.0, 96.0)
+}
+
+pub(crate) fn luma_u8(rgb: [u8; 3]) -> u8 {
+    ((77 * u32::from(rgb[0]) + 150 * u32::from(rgb[1]) + 29 * u32::from(rgb[2])) >> 8) as u8
+}
+
+pub(crate) fn luma_median_and_iqr(samples: &[[u8; 3]]) -> (u8, u8) {
+    if samples.is_empty() {
+        return (u8::MAX, 0);
+    }
+    let mut histogram = [0_u32; 256];
+    for sample in samples {
+        histogram[usize::from(luma_u8(*sample))] += 1;
+    }
+    let count = samples.len();
+    let median = histogram_median(&histogram, count);
+    let p25 = histogram_value_at(&histogram, (count.saturating_sub(1)) / 4);
+    let p75 = histogram_value_at(&histogram, (count.saturating_sub(1) * 3) / 4);
+    (median, p75.saturating_sub(p25))
+}
+
+pub(crate) fn synthesize_halo_stroke(
+    fill_color: [u8; 4],
+    halo_samples: &[[u8; 3]],
+    font_size: f32,
+) -> (Option<[u8; 4]>, Option<f32>, Option<([u8; 4], f32)>) {
+    let fill_luma = (77 * u32::from(fill_color[0])
+        + 150 * u32::from(fill_color[1])
+        + 29 * u32::from(fill_color[2]))
+        >> 8;
+    let (_bg_luma, iqr) = luma_median_and_iqr(halo_samples);
+    let primary_stroke_color = if fill_luma > 128 {
+        [0, 0, 0, u8::MAX]
+    } else {
+        [u8::MAX, u8::MAX, u8::MAX, u8::MAX]
+    };
+    let primary_width = (font_size * 0.12).clamp(2.0, 5.0);
+    let primary_luma = luma_u8([
+        primary_stroke_color[0],
+        primary_stroke_color[1],
+        primary_stroke_color[2],
+    ]);
+    let low_contrast_samples = halo_samples
+        .iter()
+        .filter(|sample| luma_u8(**sample).abs_diff(primary_luma) < HALO_LOW_CONTRAST_LUMA_DELTA)
+        .count();
+    let low_contrast_half =
+        !halo_samples.is_empty() && low_contrast_samples * 2 >= halo_samples.len();
+    let outer_stroke = if iqr >= HALO_HIGH_VARIANCE_IQR || low_contrast_half {
+        let outer_color = if primary_stroke_color[0] == u8::MAX {
+            [0, 0, 0, u8::MAX]
+        } else {
+            [u8::MAX, u8::MAX, u8::MAX, u8::MAX]
+        };
+        let outer_width = (primary_width * 0.65).clamp(1.5, 3.5);
+        Some((outer_color, outer_width))
+    } else {
+        None
+    };
+    (Some(primary_stroke_color), Some(primary_width), outer_stroke)
+}
+
+fn dilate_u8_square(mask: &[u8], width: u32, height: u32, radius: u32) -> Vec<u8> {
+    let w = width as usize;
+    let h = height as usize;
+    let r = radius as usize;
+    if w == 0 || h == 0 || mask.len() != w * h {
+        return Vec::new();
+    }
+    let mut horizontal = vec![0_u8; w * h];
+    for y in 0..h {
+        let row = y * w;
+        for x in 0..w {
+            let start = x.saturating_sub(r);
+            let end = (x + r).min(w - 1);
+            let mut value = 0_u8;
+            for sample_x in start..=end {
+                if mask[row + sample_x] != 0 {
+                    value = u8::MAX;
+                    break;
+                }
+            }
+            horizontal[row + x] = value;
+        }
+    }
+    let mut output = vec![0_u8; w * h];
+    for y in 0..h {
+        let start_y = y.saturating_sub(r);
+        let end_y = (y + r).min(h - 1);
+        for x in 0..w {
+            let mut value = 0_u8;
+            for sample_y in start_y..=end_y {
+                if horizontal[sample_y * w + x] != 0 {
+                    value = u8::MAX;
+                    break;
+                }
+            }
+            output[y * w + x] = value;
+        }
+    }
+    output
+}
+
+fn sample_text_halo_pixels(
+    image: &RgbImage,
+    mask: &KoharuLayoutMask,
+    [bbox_left, bbox_top, bbox_right, bbox_bottom]: [f32; 4],
+) -> Vec<[u8; 3]> {
+    let margin = HALO_OUTER_DILATE_RADIUS as f32;
+    let Some([left, top, right, bottom]) = mask_window(
+        [
+            bbox_left - margin,
+            bbox_top - margin,
+            bbox_right + margin,
+            bbox_bottom + margin,
+        ],
+        image.width(),
+        image.height(),
+    ) else {
+        return Vec::new();
+    };
+    let crop_width = right - left;
+    let crop_height = bottom - top;
+    let mut local_mask = vec![0_u8; crop_width as usize * crop_height as usize];
+    let mut has_mask = false;
+    for y in top..bottom {
+        for x in left..right {
+            if mask.contains(x, y) {
+                local_mask[(y - top) as usize * crop_width as usize + (x - left) as usize] = u8::MAX;
+                has_mask = true;
+            }
+        }
+    }
+    if has_mask {
+        let inner = dilate_u8_square(&local_mask, crop_width, crop_height, HALO_INNER_DILATE_RADIUS);
+        let outer = dilate_u8_square(&local_mask, crop_width, crop_height, HALO_OUTER_DILATE_RADIUS);
+        let mut ring = Vec::new();
+        for y in top..bottom {
+            for x in left..right {
+                let idx = (y - top) as usize * crop_width as usize + (x - left) as usize;
+                if outer[idx] != 0 && inner[idx] == 0 {
+                    ring.push(image.get_pixel(x, y).0);
+                }
+            }
+        }
+        if !ring.is_empty() {
+            return ring;
+        }
+    }
+    let background_margin = TYPOGRAPHY_SAMPLE_MARGIN.ceil() as u32;
+    let mut perimeter = Vec::new();
+    for y in top..bottom {
+        for x in left..right {
+            if x < left + background_margin
+                || x + background_margin >= right
+                || y < top + background_margin
+                || y + background_margin >= bottom
+            {
+                perimeter.push(image.get_pixel(x, y).0);
+            }
+        }
+    }
+    perimeter
 }
 
 fn containing_bubble<'regions, 'detections>(
@@ -581,12 +953,15 @@ fn infer_typography(
         width,
         height,
     )?;
-    let local_width = right - left + 2;
-    let local_height = bottom - top + 2;
+    let crop_width = right - left;
+    let crop_height = bottom - top;
+    let local_width = crop_width + 2;
+    let local_height = crop_height + 2;
     let background_margin = TYPOGRAPHY_SAMPLE_MARGIN.ceil() as u32;
     let mut points = Vec::new();
     let mut pixels = Vec::new();
     let mut background = Vec::new();
+    let mut local_mask = vec![0_u8; crop_width as usize * crop_height as usize];
     for y in top..bottom {
         for x in left..right {
             let local_x = x - left + 1;
@@ -600,6 +975,7 @@ fn infer_typography(
                 inside_mask,
             });
             if inside_mask {
+                local_mask[(y - top) as usize * crop_width as usize + (x - left) as usize] = u8::MAX;
                 points.push(MaskPoint {
                     x: f64::from(x) + 0.5,
                     y: f64::from(y) + 0.5,
@@ -616,6 +992,21 @@ fn infer_typography(
     }
     if points.is_empty() {
         return None;
+    }
+
+    let inner = dilate_u8_square(&local_mask, crop_width, crop_height, HALO_INNER_DILATE_RADIUS);
+    let outer = dilate_u8_square(&local_mask, crop_width, crop_height, HALO_OUTER_DILATE_RADIUS);
+    let mut halo_ring = Vec::new();
+    for y in top..bottom {
+        for x in left..right {
+            let idx = (y - top) as usize * crop_width as usize + (x - left) as usize;
+            if outer[idx] != 0 && inner[idx] == 0 {
+                halo_ring.push(image.get_pixel(x, y).0);
+            }
+        }
+    }
+    if !halo_ring.is_empty() {
+        background.extend_from_slice(&halo_ring);
     }
 
     let background = if background.is_empty() {
@@ -1409,6 +1800,134 @@ fn mask_geometry(mask: &KoharuLayoutMask) -> Option<Geometry> {
     })
 }
 
+fn convex_hull(points: &[Point]) -> Vec<Point> {
+    let mut pts = points.to_vec();
+    if pts.len() <= 2 {
+        return pts;
+    }
+    pts.sort_by(|a, b| {
+        a.x.partial_cmp(&b.x)
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| a.y.partial_cmp(&b.y).unwrap_or(Ordering::Equal))
+    });
+    pts.dedup_by(|a, b| (a.x - b.x).abs() < 1e-4 && (a.y - b.y).abs() < 1e-4);
+    if pts.len() <= 2 {
+        return pts;
+    }
+
+    let cross = |o: &Point, a: &Point, b: &Point| -> f64 {
+        (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x)
+    };
+
+    let mut lower = Vec::new();
+    for p in &pts {
+        while lower.len() >= 2 && cross(&lower[lower.len() - 2], &lower[lower.len() - 1], p) <= 0.0 {
+            lower.pop();
+        }
+        lower.push(*p);
+    }
+
+    let mut upper = Vec::new();
+    for p in pts.iter().rev() {
+        while upper.len() >= 2 && cross(&upper[upper.len() - 2], &upper[upper.len() - 1], p) <= 0.0 {
+            upper.pop();
+        }
+        upper.push(*p);
+    }
+
+    lower.pop();
+    upper.pop();
+    lower.extend(upper);
+    lower
+}
+
+fn polygon_area(points: &[Point]) -> f64 {
+    let n = points.len();
+    if n < 3 {
+        return 0.0;
+    }
+    let mut area = 0.0;
+    for i in 0..n {
+        let p1 = &points[i];
+        let p2 = &points[(i + 1) % n];
+        area += p1.x * p2.y - p2.x * p1.y;
+    }
+    area.abs() * 0.5
+}
+
+fn polygon_perimeter(points: &[Point]) -> f64 {
+    let n = points.len();
+    if n < 2 {
+        return 0.0;
+    }
+    let mut perimeter = 0.0;
+    for i in 0..n {
+        let p1 = &points[i];
+        let p2 = &points[(i + 1) % n];
+        let dx = p2.x - p1.x;
+        let dy = p2.y - p1.y;
+        perimeter += (dx * dx + dy * dy).sqrt();
+    }
+    perimeter
+}
+
+pub fn classify_balloon_shape(geometry: &Geometry, bbox: [f32; 4]) -> (BalloonShape, f32) {
+    let points = &geometry.points;
+    if points.len() < 3 {
+        return (FALLBACK_BALLOON_SHAPE, FALLBACK_BALLOON_CONFIDENCE);
+    }
+
+    let area = polygon_area(points);
+    let perimeter = polygon_perimeter(points);
+    if area <= 0.0 || perimeter <= 0.0 {
+        return (FALLBACK_BALLOON_SHAPE, FALLBACK_BALLOON_CONFIDENCE);
+    }
+
+    let circularity = (4.0 * std::f64::consts::PI * area) / (perimeter * perimeter);
+    let bbox_w = f64::from((bbox[2] - bbox[0]).abs().max(1.0));
+    let bbox_h = f64::from((bbox[3] - bbox[1]).abs().max(1.0));
+    let bbox_area = bbox_w * bbox_h;
+    let rectangularity = (area / bbox_area).clamp(0.0, 1.0);
+
+    let hull = convex_hull(points);
+    let hull_area = polygon_area(&hull).max(area);
+    let solidity = (area / hull_area).clamp(0.0, 1.0);
+    let hull_perimeter = polygon_perimeter(&hull);
+    let roughness = if hull_perimeter > 0.0 {
+        perimeter / hull_perimeter
+    } else {
+        1.0
+    };
+
+    if rectangularity >= NARRATION_RECTANGULARITY_THRESHOLD {
+        let confidence = (rectangularity as f32).clamp(0.7, 0.99);
+        return (BalloonShape::Narration, confidence);
+    }
+
+    if roughness >= WHISPER_ROUGHNESS_THRESHOLD
+        && solidity >= WHISPER_SOLIDITY_THRESHOLD
+        && rectangularity < NARRATION_RECTANGULARITY_THRESHOLD
+    {
+        let confidence = (((roughness - 1.0) * 3.0) as f32).clamp(0.65, 0.92);
+        return (BalloonShape::Whisper, confidence);
+    }
+
+    if solidity < SHOUT_SOLIDITY_THRESHOLD || circularity < SHOUT_CIRCULARITY_THRESHOLD {
+        let confidence = ((1.0 - circularity).max(1.0 - solidity) as f32).clamp(0.65, 0.99);
+        return (BalloonShape::Shout, confidence);
+    }
+
+    if solidity < THOUGHT_SOLIDITY_THRESHOLD && circularity < THOUGHT_CIRCULARITY_THRESHOLD {
+        let confidence = (((THOUGHT_SOLIDITY_THRESHOLD - solidity)
+            + (THOUGHT_CIRCULARITY_THRESHOLD - circularity)) as f32 * 2.5)
+            .clamp(0.65, 0.92);
+        return (BalloonShape::Thought, confidence);
+    }
+
+    let confidence = (circularity as f32).clamp(0.75, 0.99);
+    (BalloonShape::NormalSpeech, confidence)
+}
+
 async fn write_masks(
     input: &StageInput,
     edit: &mut koharu_scene::Edit,
@@ -1436,6 +1955,30 @@ async fn write_mask(
     } else {
         mask_for(detections, "text", size)
     };
+    for entity in input.scene.descendants(page)? {
+        let id = entity.id();
+        if !input.contains_entity(id)? {
+            continue;
+        }
+        let is_user = entity
+            .component::<EntityOrigin>()?
+            .is_some_and(|o| matches!(o.origin, Origin::User))
+            || entity
+                .component::<TextLayout>()?
+                .is_some_and(|l| matches!(l.origin, Origin::User))
+            || entity
+                .component::<Region>()?
+                .is_some_and(|r| matches!(r.origin, Origin::User));
+        let is_text = entity.component::<TextLayout>()?.is_some()
+            || entity
+                .component::<Region>()?
+                .is_some_and(|r| r.kind == TextRegion::kind());
+        if is_user && is_text {
+            if let Some(geo) = crate::scope::resolve_geometry(&input.scene, id)? {
+                super::inpainting::fill_polygon_on_mask(&mut mask, &geo.points);
+            }
+        }
+    }
     if let Some(bounds) = input.region {
         preserve_mask_outside_region(input, page, "text-mask", bounds, &mut mask).await?;
     }
@@ -1894,8 +2437,9 @@ mod tests {
     };
     use koharu_ml::koharu_layout_rfdetr_seg_2xl::{KoharuLayoutDetection, KoharuLayoutMask};
     use koharu_scene::{
-        At, BubbleRegion, FitsTo, FlowsIn, Geometry, Inside, Origin, PageDraft, Session,
-        TextLayout, TextLayoutKind, TextRegion, Typography, WritingMode,
+        At, BalloonClassification, BalloonShape, BubbleRegion, FitsTo, FlowsIn,
+        Geometry, Inside, Origin, PageDraft, RecognizedFrom, Session, TextLayout,
+        TextLayoutKind, TextRegion, Typography, WritingMode,
     };
 
     use super::{
@@ -1903,7 +2447,8 @@ mod tests {
         ImageSize, KoharuLayoutRFDetrSeg2XLConfig, MaskPixel, PageRegions, Processor, RegionOutput,
         StageInput, StageProcessor, closed_mask_for, color_palette, generation, infer_typography,
         layout_order, link_dialogue_regions, mask_containment, mask_for, mask_geometry,
-        non_maximum_suppression, normalize_text_color, write_region,
+        non_maximum_suppression, normalize_text_color, synthesize_halo_stroke, write_region,
+        write_regions,
     };
 
     #[test]
@@ -1944,7 +2489,7 @@ mod tests {
         let snapshot = session.commit(patch).await.unwrap().snapshot;
         let page = page.unwrap();
         let input = StageInput::new(
-            snapshot,
+            snapshot.clone(),
             page,
             None,
             None,
@@ -1957,6 +2502,97 @@ mod tests {
         );
 
         assert!(processor.skip(&input).unwrap());
+
+        let input_region = StageInput::new(
+            snapshot,
+            page,
+            None,
+            Some(crate::Bounds {
+                x: 0.0,
+                y: 0.0,
+                width: 50.0,
+                height: 50.0,
+            }),
+            std::sync::Arc::new(crate::ImageCache::default()),
+            None,
+        );
+        assert!(!processor.skip(&input_region).unwrap());
+    }
+
+    #[tokio::test]
+    async fn detection_preserves_translated_text_layers() {
+        let mut session = Session::memory().await.unwrap();
+        let generation = generation(super::PRODUCER, super::MODEL_ID).unwrap();
+        let mut page_id = None;
+        let mut text_layer_id = None;
+        let mut text_content_id = None;
+
+        let patch = session
+            .snapshot()
+            .patch(|edit| {
+                let page = edit.add_page(PageDraft::new("page", 100.0, 100.0), At::End)?;
+                let region = edit.add_analysis_region::<TextRegion>(
+                    page,
+                    At::End,
+                    &Geometry::rectangle(10.0, 10.0, 40.0, 40.0),
+                    None,
+                )?;
+
+                let content = edit.add_text_content(page, At::End)?;
+                edit.set(
+                    content,
+                    &koharu_scene::SourceText {
+                        text: koharu_scene::Authored::user("元のテキスト".to_owned()),
+                        language: None,
+                    },
+                )?;
+                edit.set(
+                    content,
+                    &koharu_scene::Translation {
+                        text: koharu_scene::Authored::generated(
+                            "Translated text".to_owned(),
+                            generation.clone(),
+                        ),
+                        language: None,
+                    },
+                )?;
+                let layer = edit.add_text_layer(
+                    page,
+                    At::End,
+                    content,
+                    &TextLayout {
+                        origin: Origin::Generated(generation.clone()),
+                        kind: TextLayoutKind::Paragraph,
+                        angle_degrees: None,
+                    },
+                )?;
+                edit.relate::<RecognizedFrom>(content, region)?;
+
+                page_id = Some(page);
+                text_layer_id = Some(layer);
+                text_content_id = Some(content);
+                Ok(())
+            })
+            .unwrap();
+
+        let snapshot = session.commit(patch).await.unwrap().snapshot;
+        let page = page_id.unwrap();
+        let input = StageInput::new(
+            snapshot.clone(),
+            page,
+            None,
+            None,
+            std::sync::Arc::new(crate::ImageCache::default()),
+            None,
+        );
+
+        let mut edit = snapshot.edit_as(generation.clone());
+        super::remove_previous_regions(&input, &mut edit, &generation).unwrap();
+        let result_patch = super::finish(edit).unwrap();
+        let final_snapshot = session.commit(result_patch).await.unwrap().snapshot;
+
+        assert!(final_snapshot.entity(text_content_id.unwrap()).is_ok());
+        assert!(final_snapshot.entity(text_layer_id.unwrap()).is_ok());
     }
 
     #[tokio::test]
@@ -2006,6 +2642,8 @@ mod tests {
                             entity: bubble,
                             mask: &bubble_mask,
                             area: 1,
+                            shape: koharu_scene::BalloonShape::NormalSpeech,
+                            confidence: 0.85,
                         }],
                         texts: vec![DetectedText {
                             entity: region,
@@ -2016,6 +2654,7 @@ mod tests {
                             inferred: None,
                         }],
                     },
+                    None,
                     &generation,
                 )
                 .unwrap();
@@ -2045,6 +2684,180 @@ mod tests {
                 .target,
             bubble
         );
+        let classification = snapshot
+            .component::<BalloonClassification>(layer)
+            .unwrap()
+            .unwrap();
+        assert_eq!(classification.shape, BalloonShape::NormalSpeech);
+        assert!((classification.confidence - 0.85).abs() < 1e-5);
+    }
+
+    #[tokio::test]
+    async fn floating_text_over_busy_artwork_synthesizes_dual_halo_stroke() {
+        let mut session = Session::memory().await.unwrap();
+        let mut page = None;
+        let setup = session
+            .snapshot()
+            .patch(|edit| {
+                page = Some(edit.add_page(PageDraft::new("page", 128.0, 128.0), At::End)?);
+                Ok(())
+            })
+            .unwrap();
+        let snapshot = session.commit(setup).await.unwrap().snapshot;
+        let page = page.unwrap();
+
+        let mut image = RgbImage::new(128, 128);
+        for (x, y, pixel) in image.enumerate_pixels_mut() {
+            *pixel = if ((x / 2) + (y / 2)).is_multiple_of(2) {
+                Rgb([18, 18, 18])
+            } else {
+                Rgb([242, 242, 242])
+            };
+        }
+        for y in 70..115 {
+            for x in 70..115 {
+                image.put_pixel(x, y, Rgb([250, 250, 250]));
+            }
+        }
+
+        let mut floating_mask = vec![0_u8; 128 * 128];
+        for y in 24..40 {
+            for x in 20..52 {
+                if (x - 20) % 8 < 4 {
+                    floating_mask[y as usize * 128 + x as usize] = u8::MAX;
+                    image.put_pixel(x, y, Rgb([0, 0, 0]));
+                }
+            }
+        }
+
+        let mut bubble_mask = vec![0_u8; 128 * 128];
+        for y in 70..115 {
+            for x in 70..115 {
+                bubble_mask[y as usize * 128 + x as usize] = u8::MAX;
+            }
+        }
+
+        let mut bubble_text_mask = vec![0_u8; 128 * 128];
+        for y in 82..98 {
+            for x in 78..106 {
+                if (x - 78) % 7 < 3 {
+                    bubble_text_mask[y as usize * 128 + x as usize] = u8::MAX;
+                    image.put_pixel(x, y, Rgb([0, 0, 0]));
+                }
+            }
+        }
+
+        let detections = vec![
+            KoharuLayoutDetection {
+                label_id: 0,
+                label: "text".to_owned(),
+                score: 0.95,
+                bbox: [20.0, 24.0, 52.0, 40.0],
+                area: floating_mask.iter().filter(|&&v| v != 0).count() as u32,
+                mask: KoharuLayoutMask {
+                    x: 0,
+                    y: 0,
+                    width: 128,
+                    height: 128,
+                    pixels: floating_mask,
+                },
+            },
+            KoharuLayoutDetection {
+                label_id: 1,
+                label: "bubble".to_owned(),
+                score: 0.98,
+                bbox: [70.0, 70.0, 115.0, 115.0],
+                area: bubble_mask.iter().filter(|&&v| v != 0).count() as u32,
+                mask: KoharuLayoutMask {
+                    x: 0,
+                    y: 0,
+                    width: 128,
+                    height: 128,
+                    pixels: bubble_mask,
+                },
+            },
+            KoharuLayoutDetection {
+                label_id: 0,
+                label: "text".to_owned(),
+                score: 0.96,
+                bbox: [78.0, 82.0, 106.0, 98.0],
+                area: bubble_text_mask.iter().filter(|&&v| v != 0).count() as u32,
+                mask: KoharuLayoutMask {
+                    x: 0,
+                    y: 0,
+                    width: 128,
+                    height: 128,
+                    pixels: bubble_text_mask,
+                },
+            },
+        ];
+
+        let generation = generation(super::PRODUCER, super::MODEL_ID).unwrap();
+        let mut edit = snapshot.edit_as(generation.clone());
+        let regions =
+            write_regions(&snapshot, &mut edit, page, &image, &detections, &generation).unwrap();
+        link_dialogue_regions(&mut edit, &regions, Some(&image), &generation).unwrap();
+        let floating_layer = regions.texts[0].layer;
+        let bubble_layer = regions.texts[1].layer;
+        let final_snapshot = session.commit(super::finish(edit).unwrap()).await.unwrap().snapshot;
+
+        let floating_typo = final_snapshot
+            .component::<Typography>(floating_layer)
+            .unwrap()
+            .unwrap();
+        assert_eq!(floating_typo.stroke_color, Some([255, 255, 255, 255]));
+        assert!(floating_typo.stroke_width.is_some_and(|w| w >= 2.0));
+        let (outer_color, outer_width) = floating_typo.outer_stroke().unwrap();
+        assert_eq!(outer_color, [0, 0, 0, 255]);
+        assert!(outer_width >= 1.5);
+
+        let bubble_typo = final_snapshot
+            .component::<Typography>(bubble_layer)
+            .unwrap()
+            .unwrap();
+        assert_eq!(bubble_typo.stroke_color, None);
+        assert_eq!(bubble_typo.stroke_width, None);
+        assert_eq!(bubble_typo.outer_stroke(), None);
+
+        let (direct_stroke, direct_width, direct_outer) = synthesize_halo_stroke(
+            [0, 0, 0, 255],
+            &[[10, 10, 10], [15, 15, 15], [240, 240, 240], [250, 250, 250]],
+            24.0,
+        );
+        assert_eq!(direct_stroke, Some([255, 255, 255, 255]));
+        assert!(direct_width.is_some());
+        assert_eq!(direct_outer.map(|(c, _)| c), Some([0, 0, 0, 255]));
+    }
+
+    #[test]
+    fn classify_balloon_shape_recognizes_whisper_and_fallbacks() {
+        use koharu_scene::Point;
+
+        let deg = Geometry {
+            origin: Origin::User,
+            points: vec![Point { x: 0.0, y: 0.0 }],
+        };
+        let (shape, conf) = super::classify_balloon_shape(&deg, [0.0, 0.0, 10.0, 10.0]);
+        assert_eq!(shape, BalloonShape::NormalSpeech);
+        assert_eq!(conf, 0.5);
+
+        let mut points = Vec::new();
+        let n = 36;
+        for i in 0..n {
+            let angle = (i as f64) * 2.0 * std::f64::consts::PI / (n as f64);
+            let r = 50.0 + if i % 2 == 0 { 3.0 } else { -3.0 };
+            points.push(Point {
+                x: 100.0 + r * angle.cos(),
+                y: 100.0 + r * angle.sin(),
+            });
+        }
+        let whisper_geo = Geometry {
+            origin: Origin::User,
+            points,
+        };
+        let (shape, conf) = super::classify_balloon_shape(&whisper_geo, [40.0, 40.0, 160.0, 160.0]);
+        assert_eq!(shape, BalloonShape::Whisper);
+        assert!(conf >= 0.65);
     }
 
     fn detection(label: &str, score: f32, bbox: [f32; 4]) -> KoharuLayoutDetection {
@@ -2769,5 +3582,96 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert!(color_palette(&pixels).len() <= 16 * 16 * 16);
+    }
+
+    #[test]
+    fn classify_balloon_shape_recognizes_synthetic_shapes() {
+        use koharu_scene::{BalloonShape, Point};
+
+        let rect_geo = Geometry {
+            origin: Origin::User,
+            points: vec![
+                Point { x: 10.0, y: 10.0 },
+                Point { x: 110.0, y: 10.0 },
+                Point { x: 110.0, y: 70.0 },
+                Point { x: 10.0, y: 70.0 },
+            ],
+        };
+        let (shape, conf) = super::classify_balloon_shape(&rect_geo, [10.0, 10.0, 110.0, 70.0]);
+        assert_eq!(shape, BalloonShape::Narration);
+        assert!(conf > 0.8);
+
+        let mut ellipse_pts = Vec::new();
+        for i in 0..32 {
+            let theta = (i as f64) * std::f64::consts::PI * 2.0 / 32.0;
+            ellipse_pts.push(Point {
+                x: 100.0 + 50.0 * theta.cos(),
+                y: 100.0 + 40.0 * theta.sin(),
+            });
+        }
+        let ellipse_geo = Geometry {
+            origin: Origin::User,
+            points: ellipse_pts,
+        };
+        let (shape, conf) = super::classify_balloon_shape(&ellipse_geo, [50.0, 60.0, 150.0, 140.0]);
+        assert_eq!(shape, BalloonShape::NormalSpeech);
+        assert!(conf > 0.7);
+
+        let mut shout_pts = Vec::new();
+        for i in 0..16 {
+            let theta = (i as f64) * std::f64::consts::PI * 2.0 / 16.0;
+            let r = if i % 2 == 0 { 60.0 } else { 20.0 };
+            shout_pts.push(Point {
+                x: 100.0 + r * theta.cos(),
+                y: 100.0 + r * theta.sin(),
+            });
+        }
+        let shout_geo = Geometry {
+            origin: Origin::User,
+            points: shout_pts,
+        };
+        let (shape, _) = super::classify_balloon_shape(&shout_geo, [40.0, 40.0, 160.0, 160.0]);
+        assert_eq!(shape, BalloonShape::Shout);
+    }
+
+    #[tokio::test]
+    async fn text_layer_with_user_source_text_on_content_is_preserved() {
+        use super::PRODUCER;
+        use koharu_scene::{
+            Authored, Generation, PageDraft, ProducerId, Session, SourceText,
+        };
+
+        let mut session = Session::memory().await.unwrap();
+        let generation = Generation::new(ProducerId::new(PRODUCER).unwrap());
+        let mut layer_id = None;
+        let patch = session
+            .snapshot()
+            .patch(|edit| {
+                let page = edit.add_page(PageDraft::new("p1", 100.0, 100.0), At::End)?;
+                let content = edit.add_text_content(page, At::End)?;
+                edit.set(
+                    content,
+                    &SourceText {
+                        text: Authored::user("User OCR override".to_owned()),
+                        language: None,
+                    },
+                )?;
+                let layer = edit.add_text_layer(
+                    page,
+                    At::End,
+                    content,
+                    &TextLayout {
+                        origin: Origin::Generated(generation),
+                        kind: TextLayoutKind::Paragraph,
+                        angle_degrees: None,
+                    },
+                )?;
+                layer_id = Some(layer);
+                Ok(())
+            })
+            .unwrap();
+        let snapshot = session.commit(patch).await.unwrap().snapshot;
+
+        assert!(super::is_preserved_text_layer(&snapshot, layer_id.unwrap()).unwrap());
     }
 }
