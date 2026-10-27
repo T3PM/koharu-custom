@@ -35,9 +35,13 @@ export const commands = {
 	regions: AnalysisRegion[],
 } | null>("get_page").then((v) => (v==null?v:({...v,layers:v.layers.map(i=>i),regions:v.regions.map(i=>({...i,geometry:({...i.geometry,points:i.geometry.points.map(i=>i)})}))}) as typeof v)),
 	listProjects: () => __TAURI_INVOKE<ProjectSummary[]>("list_projects"),
+	listWorkspaceDirectories: () => __TAURI_INVOKE<string[]>("list_workspace_directories"),
+	addWorkspaceDirectory: (path: string) => __TAURI_INVOKE<string[]>("add_workspace_directory", { path }),
+	removeWorkspaceDirectory: (path: string) => __TAURI_INVOKE<string[]>("remove_workspace_directory", { path }),
+	setPrimaryWorkspaceDirectory: (path: string) => __TAURI_INVOKE<null>("set_primary_workspace_directory", { path }),
 	createProject: (name: string) => __TAURI_INVOKE<null>("create_project", { name }),
-	openProject: (name: string) => __TAURI_INVOKE<null>("open_project", { name }),
-	deleteProject: (name: string) => __TAURI_INVOKE<null>("delete_project", { name }),
+	openProject: (path: string) => __TAURI_INVOKE<null>("open_project", { path }),
+	deleteProject: (path: string) => __TAURI_INVOKE<null>("delete_project", { path }),
 	closeProject: () => __TAURI_INVOKE<null>("close_project"),
 	import: (source: PageImportSource, chapter: string | null) => __TAURI_INVOKE<null>("import", { source, chapter }),
 	selectPage: (page: EntityId) => __TAURI_INVOKE<PageSelection>("select_page", { page }).then((v) => (({...v,page:({...v.page,layers:v.page.layers.map(i=>i),regions:v.page.regions.map(i=>({...i,geometry:({...i.geometry,points:i.geometry.points.map(i=>i)})}))})}) as typeof v)),
@@ -82,18 +86,33 @@ export const commands = {
 	layer: EntityId,
 } | null>("detect_text_box", { frame }),
 	setPageChapter: (page: EntityId, chapter: string | null) => __TAURI_INVOKE<null>("set_page_chapter", { page, chapter }),
+	setBubbleSpeaker: (expectedRevision: Revision, layer: EntityId, speaker: string | null) => __TAURI_INVOKE<null>("set_bubble_speaker", { expectedRevision, layer, speaker }),
+	guessPageSpeakers: (expectedRevision: Revision, page: EntityId) => __TAURI_INVOKE<null>("guess_page_speakers", { expectedRevision, page }),
+	setBalloonShape: (expectedRevision: Revision, layer: EntityId, shape: "normal_speech" | "shout" | "thought" | "whisper" | "narration" | null) => __TAURI_INVOKE<null>("set_balloon_shape", { expectedRevision, layer, shape }),
 	importFolderAsProject: (folderPath: string | null) => __TAURI_INVOKE<null>("import_folder_as_project", { folderPath }),
 	exportChapter: (chapter: string, format: ExportFormat) => __TAURI_INVOKE<null>("export_chapter", { chapter, format }),
 	getGlossary: () => __TAURI_INVOKE<GlossaryView>("get_glossary").then((v) => (({...v,entries:v.entries.map(i=>({...i,confidence:i.confidence==null?i.confidence:i.confidence}))}) as typeof v)),
 	setGlossaryEnabled: (expectedRevision: Revision, enabled: boolean) => __TAURI_INVOKE<GlossaryView>("set_glossary_enabled", { expectedRevision, enabled }).then((v) => (({...v,entries:v.entries.map(i=>({...i,confidence:i.confidence==null?i.confidence:i.confidence}))}) as typeof v)),
 	addGlossaryEntry: (expectedRevision: Revision, draft: GlossaryEntryDraft) => __TAURI_INVOKE<GlossaryView>("add_glossary_entry", { expectedRevision, draft }).then((v) => (({...v,entries:v.entries.map(i=>({...i,confidence:i.confidence==null?i.confidence:i.confidence}))}) as typeof v)),
 	updateGlossaryEntry: (expectedRevision: Revision, id: GlossaryEntryId, patch: GlossaryEntryPatch) => __TAURI_INVOKE<GlossaryView>("update_glossary_entry", { expectedRevision, id, patch }).then((v) => (({...v,entries:v.entries.map(i=>({...i,confidence:i.confidence==null?i.confidence:i.confidence}))}) as typeof v)),
+	updateCharacterProfile: (expectedRevision: Revision, entryId: GlossaryEntryId, profile: {
+	id: GlossaryEntryId,
+	gender: CharacterGender,
+	firstPerson: string | null,
+	secondPerson: string | null,
+	tone: string | null,
+	customInstructions: string | null,
+	honorificPolicy?: string | null,
+} | null) => __TAURI_INVOKE<GlossaryView>("update_character_profile", { expectedRevision, entryId, profile }).then((v) => (({...v,entries:v.entries.map(i=>({...i,confidence:i.confidence==null?i.confidence:i.confidence}))}) as typeof v)),
 	deleteGlossaryEntries: (expectedRevision: Revision, ids: GlossaryEntryId[]) => __TAURI_INVOKE<GlossaryView>("delete_glossary_entries", { expectedRevision, ids }).then((v) => (({...v,entries:v.entries.map(i=>({...i,confidence:i.confidence==null?i.confidence:i.confidence}))}) as typeof v)),
 	previewGlossaryImport: (document: string) => __TAURI_INVOKE<GlossaryImportPreview>("preview_glossary_import", { document }),
 	applyGlossaryImport: (expectedRevision: Revision, document: string, strategy: GlossaryImportStrategy, confirmLanguageMismatch: boolean) => __TAURI_INVOKE<GlossaryView>("apply_glossary_import", { expectedRevision, document, strategy, confirmLanguageMismatch }).then((v) => (({...v,entries:v.entries.map(i=>({...i,confidence:i.confidence==null?i.confidence:i.confidence}))}) as typeof v)),
 	exportGlossary: () => __TAURI_INVOKE<string>("export_glossary"),
-	scanGlossary: () => __TAURI_INVOKE<GlossaryView>("scan_glossary").then((v) => (({...v,entries:v.entries.map(i=>({...i,confidence:i.confidence==null?i.confidence:i.confidence}))}) as typeof v)),
+	scanGlossary: () => __TAURI_INVOKE<GlossaryScanReport>("scan_glossary").then((v) => (({...v,glossary:({...v.glossary,entries:v.glossary.entries.map(i=>({...i,confidence:i.confidence==null?i.confidence:i.confidence}))})}) as typeof v)),
+	locateGlossaryEntry: (entryId: GlossaryEntryId) => __TAURI_INVOKE<GlossaryOccurrence[]>("locate_glossary_entry", { entryId }),
+	classifyGlossaryEntries: (expectedRevision: Revision, ids: GlossaryEntryId[] | null) => __TAURI_INVOKE<GlossaryView>("classify_glossary_entries", { expectedRevision, ids }).then((v) => (({...v,entries:v.entries.map(i=>({...i,confidence:i.confidence==null?i.confidence:i.confidence}))}) as typeof v)),
 	translateGlossaryEntries: (expectedRevision: Revision, ids: GlossaryEntryId[] | null) => __TAURI_INVOKE<GlossaryView>("translate_glossary_entries", { expectedRevision, ids }).then((v) => (({...v,entries:v.entries.map(i=>({...i,confidence:i.confidence==null?i.confidence:i.confidence}))}) as typeof v)),
+	lintGlossary: (chapter: string | null) => __TAURI_INVOKE<GlossaryLintIssue[]>("lint_glossary", { chapter }).then((v) => (v.map(i=>i) as typeof v)),
 	deleteFolder: (name: string, deletePages: boolean) => __TAURI_INVOKE<null>("delete_folder", { name, deletePages }),
 	getTrashItems: () => __TAURI_INVOKE<TrashItem[]>("get_trash_items").then((v) => (v.map(i=>({...i,pages:i.pages.map(i=>i)})) as typeof v)),
 	restoreTrashItem: (id: string) => __TAURI_INVOKE<null>("restore_trash_item", { id }),
@@ -123,6 +142,8 @@ export type AnalysisRegion = {
 	label: string | null,
 };
 
+export type BalloonShape = "normal_speech" | "shout" | "thought" | "whisper" | "narration";
+
 export type Bounds = {
 	x: number,
 	y: number,
@@ -147,6 +168,18 @@ export type CanvasState = {
 	generation: number,
 	size: [number, number],
 	element_frames: TransformFrame[],
+};
+
+export type CharacterGender = "unspecified" | "male" | "female" | "non_binary";
+
+export type CharacterProfile = {
+	id: GlossaryEntryId,
+	gender: CharacterGender,
+	firstPerson: string | null,
+	secondPerson: string | null,
+	tone: string | null,
+	customInstructions: string | null,
+	honorificPolicy?: string | null,
 };
 
 export type ClaudeConfig = Record<string, never>;
@@ -286,6 +319,8 @@ export type GlossaryEntryDraft = {
 	translation: string | null,
 	kind: GlossaryKind,
 	enabled: boolean,
+	character: CharacterProfile | null,
+	forbiddenVariants?: string[],
 };
 
 export type GlossaryEntryId = string;
@@ -295,6 +330,8 @@ export type GlossaryEntryPatch = {
 	translation: string | null,
 	kind: GlossaryKind,
 	enabled: boolean,
+	character: CharacterProfile | null,
+	forbiddenVariants?: string[],
 };
 
 export type GlossaryEntryView = {
@@ -310,6 +347,8 @@ export type GlossaryEntryView = {
 	sourceOrigin: GlossaryValueOrigin,
 	translationOrigin: GlossaryValueOrigin | null,
 	presentInLastScan: boolean,
+	character: CharacterProfile | null,
+	forbiddenVariants?: string[],
 };
 
 export type GlossaryImportPreview = {
@@ -322,6 +361,39 @@ export type GlossaryImportPreview = {
 export type GlossaryImportStrategy = "keep_existing" | "replace_existing";
 
 export type GlossaryKind = "person" | "place" | "organization" | "item" | "ability" | "term" | "other";
+
+export type GlossaryLintIssue = {
+	kind: GlossaryLintKind,
+	severity: GlossaryLintSeverity,
+	pageId: EntityId,
+	pageIndex: number,
+	pageLabel: string,
+	chapter: string | null,
+	layerId: EntityId,
+	entryId: GlossaryEntryId | null,
+	speakerId: GlossaryEntryId | null,
+	expected: string,
+	actual: string,
+	message: string,
+};
+
+export type GlossaryLintKind = "missing_glossary_term" | "forbidden_variant_used" | "untranslated_source_leak" | "speaker_first_person_mismatch" | "speaker_honorific_conflict" | "cross_chapter_speaker_drift";
+
+export type GlossaryLintSeverity = "error" | "warning";
+
+export type GlossaryOccurrence = {
+	pageId: EntityId,
+	entityId: EntityId,
+	pageIndex: number,
+	snippet: string,
+};
+
+export type GlossaryScanReport = {
+	glossary: GlossaryView,
+	summary: GlossaryScanSummary,
+};
+
+export type GlossaryScanSummary = { status: "no_source_text" } | { status: "no_terms_found"; sourceTextCount: number } | { status: "updated"; sourceTextCount: number; candidateOccurrenceCount: number; distinctTermCount: number; addedEntryCount: number; matchedEntryCount: number };
 
 export type GlossaryValueOrigin = "detected" | "automatic" | "user" | "imported";
 
@@ -390,7 +462,7 @@ export type LanguageMismatch = {
 
 export type LanguageTag = string;
 
-export type Layer = { type: "group"; id: EntityId; parent: EntityId | null; visibility: LayerVisibility; name: string; role: GroupRole | null } | { type: "text"; id: EntityId; parent: EntityId | null; geometry: Geometry | null; angle_degrees: number | null; visibility: LayerVisibility; content: TextContent; typography: Typography | null; layout: TextLayoutKind; automatic_region: EntityId | null } | { type: "raster"; id: EntityId; parent: EntityId | null; visibility: LayerVisibility; image: string | null; name: string; kind: RasterLayerKind } | { type: "image"; id: EntityId; parent: EntityId | null; geometry: Geometry; visibility: LayerVisibility; image: string } | { type: "artwork"; id: EntityId; parent: EntityId | null; geometry: Geometry; visibility: LayerVisibility; image: string };
+export type Layer = { type: "group"; id: EntityId; parent: EntityId | null; visibility: LayerVisibility; name: string; role: GroupRole | null } | { type: "text"; id: EntityId; parent: EntityId | null; geometry: Geometry | null; angle_degrees: number | null; visibility: LayerVisibility; content: TextContent; typography: Typography | null; layout: TextLayoutKind; automatic_region: EntityId | null; speaker: GlossaryEntryId | null; balloon_shape: BalloonShape | null } | { type: "raster"; id: EntityId; parent: EntityId | null; visibility: LayerVisibility; image: string | null; name: string; kind: RasterLayerKind } | { type: "image"; id: EntityId; parent: EntityId | null; geometry: Geometry; visibility: LayerVisibility; image: string } | { type: "artwork"; id: EntityId; parent: EntityId | null; geometry: Geometry; visibility: LayerVisibility; image: string };
 
 export type LayerCommit = {
 	revision: Revision,
@@ -532,6 +604,7 @@ export type ProjectInfo = {
 
 export type ProjectSummary = {
 	name: string,
+	path: string,
 };
 
 export type Provider = "local" | "openai" | "gemini" | "claude" | "grok" | "minimax" | "deepseek" | "openai-compatible" | "openrouter" | "lm-studio" | "deepl" | "google-cloud-translation" | "caiyun";
@@ -614,6 +687,10 @@ export type TranslationConfig = {
 	generation: GenerationConfig,
 	target_language: string,
 	instructions: string | null,
+	enable_personas?: boolean,
+	enable_speaker_tagging?: boolean,
+	context_window_pages?: number,
+	auto_guess_speakers?: boolean,
 };
 
 export type TrashItem = {
@@ -623,6 +700,7 @@ export type TrashItem = {
 	timestamp: number,
 	chapter: string | null,
 	pages: TrashPageRecord[],
+	page_ids?: EntityId[],
 };
 
 export type TrashKind = "page" | "folder" | "folder_with_pages";
@@ -641,6 +719,9 @@ export type TypesettingConfig = {
 	dialogue_font?: string | null,
 	sfx_font?: string | null,
 	narration_font?: string | null,
+	shout_font?: string | null,
+	thought_font?: string | null,
+	whisper_font?: string | null,
 	font_size?: number | null,
 	font_weight?: number | null,
 };

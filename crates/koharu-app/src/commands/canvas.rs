@@ -610,18 +610,70 @@ pub(crate) async fn detect_text_box(
         });
 
         if let Some(layer) = matched {
-            (snapshot.revision(), layer)
+            let content = snapshot
+                .relation_from::<koharu_scene::Presents>(layer)?
+                .map(|r| r.value().target);
+            let region = if let Some(content) = content {
+                snapshot
+                    .relation_from::<koharu_scene::RecognizedFrom>(content)?
+                    .map(|r| r.value().target)
+            } else {
+                None
+            };
+
+            let geometry = if let Some(region_id) = region {
+                if let Ok(Some(region_geom)) = snapshot.component::<koharu_scene::Geometry>(region_id) {
+                    koharu_scene::Geometry {
+                        origin: koharu_scene::Origin::User,
+                        points: region_geom.points.clone(),
+                    }
+                } else {
+                    koharu_scene::Geometry::rectangle(
+                        frame.x as f64,
+                        frame.y as f64,
+                        frame.width as f64,
+                        frame.height as f64,
+                    )
+                }
+            } else {
+                koharu_scene::Geometry::rectangle(
+                    frame.x as f64,
+                    frame.y as f64,
+                    frame.width as f64,
+                    frame.height as f64,
+                )
+            };
+
+            let patch = snapshot.patch(|edit| {
+                edit.set(layer, &geometry)?;
+                edit.promote_entity_to_user(layer)?;
+                if let Ok(Some(mut layout)) = snapshot.component::<koharu_scene::TextLayout>(layer) {
+                    layout.origin = koharu_scene::Origin::User;
+                    edit.set(layer, &layout)?;
+                }
+                if let Some(content) = content {
+                    edit.promote_entity_to_user(content)?;
+                }
+                if let Some(region) = region {
+                    edit.promote_entity_to_user(region)?;
+                }
+                Ok(())
+            })?;
+            let commit = proj.commit(patch).await?;
+            proj.record_commit(&commit);
+            (commit, layer)
         } else {
             let (commit, layer) = proj.add_text_box(page, frame).await?;
             proj.record_commit(&commit);
-            (commit.revision, layer)
+            (commit, layer)
         }
     };
 
+    desktop.synchronize(&commit.snapshot, Some(page), &commit).await?;
     let canvas = desktop.canvas_state();
     canvas_channel.channel.publish(canvas);
     Ok(Some(LayerCommit {
-        revision: commit,
+        revision: commit.revision,
         layer,
     }))
 }

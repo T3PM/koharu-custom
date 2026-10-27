@@ -1,13 +1,13 @@
-use std::{collections::HashSet, io::Cursor, path::PathBuf};
+use std::{collections::{BTreeSet, HashSet}, io::Cursor, path::{Path, PathBuf}};
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use image::{DynamicImage, ImageFormat, RgbaImage};
 use koharu_desktop::Frame;
 use koharu_scene::{
-    AssetInput, AssetMetadata, AssetRole, At, Authored, Commit, EntityId, EntityOrigin,
-    Geometry as SceneGeometry, Group as SceneGroup, Origin, PageDraft, Point as ScenePoint,
-    Presents, RasterLayer as SceneRasterLayer, RasterLayerKind, Region as SceneRegion,
-    RemovePolicy, Revision, Session, Snapshot, SourceText as SceneSourceText,
+    AssetInput, AssetMetadata, AssetRole, At, Authored, BalloonShape, Commit, EntityId, EntityOrigin,
+    Generation, Geometry as SceneGeometry, Glossary, GlossaryEntryId, GlossaryKind, Group as SceneGroup, Origin,
+    PageDraft, Point as ScenePoint, Presents, ProducerId, RasterLayer as SceneRasterLayer, RasterLayerKind,
+    Region as SceneRegion, RemovePolicy, Revision, Session, Snapshot, SourceText as SceneSourceText,
     TextGroup as SceneTextGroup, TextLayout as SceneTextLayout, TextLayoutKind,
     Translation as SceneTranslation, Typography as SceneTypography, Visibility as SceneVisibility,
 };
@@ -49,6 +49,8 @@ pub struct TrashItem {
     pub timestamp: u64,
     pub chapter: Option<String>,
     pub pages: Vec<TrashPageRecord>,
+    #[serde(default)]
+    pub page_ids: Vec<EntityId>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -69,6 +71,30 @@ pub struct ProjectInfo {
 #[derive(Clone, Debug, Serialize, Type)]
 pub struct ProjectSummary {
     pub name: String,
+    pub path: PathBuf,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WorkspaceConfig {
+    #[serde(default = "default_primary_workspace")]
+    pub primary: PathBuf,
+    #[serde(default)]
+    pub roots: Vec<PathBuf>,
+}
+
+fn default_primary_workspace() -> PathBuf {
+    dirs::document_dir()
+        .map(|dir| dir.join("Koharu"))
+        .unwrap_or_else(|| PathBuf::from("Koharu"))
+}
+
+impl Default for WorkspaceConfig {
+    fn default() -> Self {
+        Self {
+            primary: default_primary_workspace(),
+            roots: Vec::new(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Type)]
@@ -117,6 +143,8 @@ pub enum Layer {
         typography: Option<Typography>,
         layout: TextLayoutKind,
         automatic_region: Option<EntityId>,
+        speaker: Option<GlossaryEntryId>,
+        balloon_shape: Option<BalloonShape>,
     },
     Raster {
         id: EntityId,
@@ -209,25 +237,124 @@ pub(crate) struct CurrentProject {
 
 #[derive(Clone)]
 pub(crate) struct ProjectLibrary {
-    root: PathBuf,
+    config: koharu_config::Config<WorkspaceConfig>,
 }
 
 impl ProjectLibrary {
     pub(crate) fn new() -> Result<Self> {
-        let root = dirs::document_dir()
-            .context("the Documents directory is unavailable")?
-            .join("Koharu");
-        std::fs::create_dir_all(&root)
-            .with_context(|| format!("failed to create {}", root.display()))?;
-        Ok(Self { root })
+        let config = koharu_config::load::<WorkspaceConfig>("workspace")?;
+        let primary = config.read()?.primary.clone();
+        if !primary.as_os_str().is_empty() {
+            let _ = std::fs::create_dir_all(&primary);
+        }
+        Ok(Self { config })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn memory(primary: PathBuf, roots: Vec<PathBuf>) -> Self {
+        Self {
+            config: koharu_config::Config::memory(WorkspaceConfig { primary, roots }),
+        }
+    }
+
+    pub(crate) fn primary(&self) -> Result<PathBuf> {
+        let primary = self.config.read()?.primary.clone();
+        if !primary.as_os_str().is_empty() {
+            let _ = std::fs::create_dir_all(&primary);
+        }
+        Ok(primary)
+    }
+
+    pub(crate) fn all_roots(&self) -> Result<Vec<PathBuf>> {
+        let read = self.config.read()?;
+        let mut roots = Vec::new();
+        if !read.primary.as_os_str().is_empty() {
+            roots.push(read.primary.clone());
+        }
+        for root in &read.roots {
+            if !root.as_os_str().is_empty() && !roots.iter().any(|r| r == root) {
+                roots.push(root.clone());
+            }
+        }
+        Ok(roots)
+    }
+
+    pub(crate) fn list_workspace_directories(&self) -> Result<Vec<String>> {
+        let roots = self.all_roots()?;
+        Ok(roots
+            .into_iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect())
+    }
+
+    pub(crate) fn add_workspace_directory(&self, path_str: &str) -> Result<Vec<String>> {
+        let path = PathBuf::from(path_str);
+        if !path.is_dir() {
+            bail!("path is not an existing directory: {path_str}");
+        }
+        let canonical = std::fs::canonicalize(&path).unwrap_or(path);
+        {
+            let mut write = self.config.write()?;
+            let primary_canonical = std::fs::canonicalize(&write.primary).unwrap_or_else(|_| write.primary.clone());
+            if canonical != primary_canonical && !write.roots.iter().any(|r| {
+                std::fs::canonicalize(r).unwrap_or_else(|_| r.clone()) == canonical
+            }) {
+                write.roots.push(canonical);
+            }
+        }
+        self.config.save()?;
+        self.list_workspace_directories()
+    }
+
+    pub(crate) fn remove_workspace_directory(&self, path_str: &str) -> Result<Vec<String>> {
+        let path = PathBuf::from(path_str);
+        let canonical = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+        {
+            let mut write = self.config.write()?;
+            write.roots.retain(|r| {
+                let r_canonical = std::fs::canonicalize(r).unwrap_or_else(|_| r.clone());
+                r != &path && r_canonical != canonical
+            });
+        }
+        self.config.save()?;
+        self.list_workspace_directories()
+    }
+
+    pub(crate) fn set_primary_workspace_directory(&self, path_str: &str) -> Result<()> {
+        let path = PathBuf::from(path_str);
+        if !path.is_dir() {
+            bail!("path is not an existing directory: {path_str}");
+        }
+        let canonical = std::fs::canonicalize(&path).unwrap_or(path);
+        {
+            let mut write = self.config.write()?;
+            write.roots.retain(|r| {
+                std::fs::canonicalize(r).unwrap_or_else(|_| r.clone()) != canonical
+            });
+            write.primary = canonical;
+        }
+        self.config.save()?;
+        Ok(())
     }
 
     pub(crate) fn list(&self) -> Result<Vec<ProjectSummary>> {
-        let mut projects = std::fs::read_dir(&self.root)
-            .with_context(|| format!("failed to read {}", self.root.display()))?
-            .filter_map(|entry| entry.ok())
-            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
-            .filter_map(|entry| {
+        let roots = self.all_roots()?;
+        let mut seen_paths = std::collections::HashSet::new();
+        let mut projects = Vec::new();
+
+        for root in roots {
+            let entries = match std::fs::read_dir(&root) {
+                Ok(entries) => entries,
+                Err(err) => {
+                    tracing::warn!("failed to read workspace directory {}: {err}", root.display());
+                    continue;
+                }
+            };
+
+            for entry in entries.filter_map(|e| e.ok()) {
+                if !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                    continue;
+                }
                 let path = entry.path();
                 let is_project_directory = path
                     .extension()
@@ -235,21 +362,34 @@ impl ProjectLibrary {
                     .is_some_and(|extension| extension.eq_ignore_ascii_case("khrproj"))
                     && (path.join("state-a.khr").is_file() || path.join("state-b.khr").is_file());
                 if !is_project_directory {
-                    return None;
+                    continue;
                 }
+
+                let canonical = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+                if !seen_paths.insert(canonical) {
+                    continue;
+                }
+
                 let last_used = ["state-a.khr", "state-b.khr"]
                     .into_iter()
                     .filter_map(|file| std::fs::metadata(path.join(file)).ok()?.modified().ok())
                     .max()
                     .unwrap_or(std::time::UNIX_EPOCH);
-                Some((
+
+                let Some(name) = path.file_stem().and_then(|stem| stem.to_str()).map(|s| s.to_owned()) else {
+                    continue;
+                };
+
+                projects.push((
                     last_used,
                     ProjectSummary {
-                        name: path.file_stem()?.to_str()?.to_owned(),
+                        name,
+                        path,
                     },
-                ))
-            })
-            .collect::<Vec<_>>();
+                ));
+            }
+        }
+
         projects.sort_unstable_by(|(left_used, left), (right_used, right)| {
             right_used
                 .cmp(left_used)
@@ -259,27 +399,56 @@ impl ProjectLibrary {
     }
 
     pub(crate) async fn create(&self, name: &str) -> Result<Project> {
-        let (name, path) = self.resolve(name)?;
+        let name = validate_project_name(name)?;
+        let primary = self.primary()?;
+        let path = primary.join(format!("{name}.khrproj"));
         Project::create(name, path).await
     }
 
-    pub(crate) async fn open(&self, name: &str) -> Result<Project> {
-        let (name, path) = self.resolve(name)?;
-        Project::open(name, path).await
+    pub(crate) async fn open(&self, path: &Path) -> Result<Project> {
+        self.validate_project_path(path)?;
+        let name = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .context("invalid project path stem")?
+            .to_owned();
+        Project::open(name, path.to_path_buf()).await
     }
 
-    pub(crate) fn delete(&self, name: &str) -> Result<()> {
-        let (_, path) = self.resolve(name)?;
+    pub(crate) fn delete(&self, path: &Path) -> Result<()> {
+        self.validate_project_path(path)?;
         if !path.is_dir() {
-            bail!("project {name:?} does not exist");
+            bail!("project path does not exist: {}", path.display());
         }
-        std::fs::remove_dir_all(&path)
+        std::fs::remove_dir_all(path)
             .with_context(|| format!("failed to delete {}", path.display()))
     }
 
-    fn resolve(&self, name: &str) -> Result<(String, PathBuf)> {
-        let name = validate_project_name(name)?;
-        Ok((name.clone(), self.root.join(format!("{name}.khrproj"))))
+    fn validate_project_path(&self, path: &Path) -> Result<()> {
+        let is_khrproj = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("khrproj"));
+        if !is_khrproj {
+            bail!("path does not have .khrproj extension: {}", path.display());
+        }
+        let has_state = path.join("state-a.khr").is_file() || path.join("state-b.khr").is_file();
+        if !has_state {
+            bail!("directory is not a valid Koharu project: {}", path.display());
+        }
+        let roots = self.all_roots()?;
+        let canonical_path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        let inside_root = roots.iter().any(|root| {
+            let canonical_root = std::fs::canonicalize(root).unwrap_or_else(|_| root.clone());
+            canonical_path.starts_with(&canonical_root)
+        });
+        if !inside_root {
+            bail!(
+                "project path {} is outside of configured workspace directories",
+                path.display()
+            );
+        }
+        Ok(())
     }
 }
 
@@ -399,6 +568,7 @@ impl Project {
             timestamp,
             chapter,
             pages: page_records,
+            page_ids: Vec::new(),
         };
 
         let mut items = self.read_trash_items().await.unwrap_or_default();
@@ -416,34 +586,55 @@ impl Project {
         let item = items.remove(index);
         let trash_dir = self.trash_dir();
 
+        let mut page_binaries = Vec::new();
+        for page_rec in &item.pages {
+            let bin_file = trash_dir.join(format!("{}.bin", page_rec.id));
+            let bytes = tokio::fs::read(&bin_file).await.unwrap_or_default();
+            page_binaries.push(bytes);
+        }
+
         let snapshot = self.snapshot();
         let patch = snapshot.patch(|edit| {
-            for page_rec in &item.pages {
-                let bin_file = trash_dir.join(format!("{}.bin", page_rec.id));
-                let bytes = std::fs::read(&bin_file).unwrap_or_default();
-                let mut draft = PageDraft::new(&page_rec.label, page_rec.width, page_rec.height);
-                if let Some(ch) = &page_rec.chapter {
-                    draft = draft.with_chapter(ch.clone());
+            if item.kind == TrashKind::Folder && !item.page_ids.is_empty() {
+                for page_id in &item.page_ids {
+                    if let Ok(page_node) = snapshot.page(*page_id) {
+                        if let Ok(page) = page_node.page() {
+                            let mut draft = PageDraft::new(page.label, page.width, page.height);
+                            if let Some(ch) = &item.chapter {
+                                draft = draft.with_chapter(ch.clone());
+                            }
+                            edit.set_page(*page_id, draft)?;
+                        }
+                    }
                 }
-                let page = edit.add_page(draft, At::End)?;
-                if !bytes.is_empty() {
-                    edit.set_asset(
-                        page,
-                        &AssetRole::new("source")?,
-                        AssetInput::new(
-                            bytes,
-                            &page_rec.mime_type,
-                            AssetMetadata {
-                                width: Some(page_rec.width as u32),
-                                height: Some(page_rec.height as u32),
-                                attributes: Default::default(),
-                            },
-                        ),
-                    )?;
+            } else {
+                for (page_rec, bytes) in item.pages.iter().zip(page_binaries.into_iter()) {
+                    let mut draft = PageDraft::new(&page_rec.label, page_rec.width, page_rec.height);
+                    if let Some(ch) = &page_rec.chapter {
+                        draft = draft.with_chapter(ch.clone());
+                    }
+                    let page = edit.add_page(draft, At::End)?;
+                    if !bytes.is_empty() {
+                        edit.set_asset(
+                            page,
+                            &AssetRole::new("source")?,
+                            AssetInput::new(
+                                bytes,
+                                &page_rec.mime_type,
+                                AssetMetadata {
+                                    width: Some(page_rec.width as u32),
+                                    height: Some(page_rec.height as u32),
+                                    attributes: Default::default(),
+                                },
+                            ),
+                        )?;
+                    }
                 }
             }
             Ok(())
         })?;
+
+        let commit = self.commit(patch).await?;
 
         for page_rec in &item.pages {
             let bin_file = trash_dir.join(format!("{}.bin", page_rec.id));
@@ -451,7 +642,7 @@ impl Project {
         }
 
         self.write_trash_items(&items).await?;
-        self.commit(patch).await
+        Ok(commit)
     }
 
     pub(crate) async fn delete_trash_item(&self, item_id: String) -> Result<()> {
@@ -562,6 +753,162 @@ impl Project {
         self.commit(patch).await
     }
 
+    pub(crate) async fn set_bubble_speaker(
+        &mut self,
+        expected_revision: Revision,
+        layer: EntityId,
+        speaker: Option<GlossaryEntryId>,
+    ) -> Result<Commit> {
+        let snapshot = self.snapshot();
+        if snapshot.revision() != expected_revision {
+            bail!(
+                "bubble speaker edit expected revision {expected_revision}, but the project is at {}",
+                snapshot.revision()
+            );
+        }
+        snapshot.text_layer(layer)?;
+        if let Some(speaker_id) = speaker {
+            let glossary = snapshot.project_component::<Glossary>()?;
+            let speaker_exists = glossary
+                .is_some_and(|g| g.entries.iter().any(|e| e.id == speaker_id));
+            if !speaker_exists {
+                bail!("speaker entry {speaker_id} does not exist in the project glossary");
+            }
+        }
+        let patch = snapshot.patch(|edit| {
+            edit.set_speaker(layer, speaker, Origin::User)
+        })?;
+        self.commit(patch).await
+    }
+
+    pub(crate) async fn set_balloon_shape(
+        &mut self,
+        expected_revision: Revision,
+        layer: EntityId,
+        shape: Option<BalloonShape>,
+    ) -> Result<Commit> {
+        let snapshot = self.snapshot();
+        if snapshot.revision() != expected_revision {
+            bail!(
+                "balloon shape edit expected revision {expected_revision}, but the project is at {}",
+                snapshot.revision()
+            );
+        }
+        let text_layer = snapshot.text_layer(layer)?;
+        let bubble_target = text_layer.balloon_target()?.map(|target| target.id());
+        let patch = snapshot.patch(|edit| {
+            if let Some(shape) = shape {
+                let classification = koharu_scene::BalloonClassification {
+                    origin: koharu_scene::Origin::User,
+                    shape,
+                    confidence: 1.0,
+                };
+                edit.set(layer, &classification)?;
+                if let Some(bubble) = bubble_target {
+                    edit.set(bubble, &classification)?;
+                }
+            } else {
+                edit.remove::<koharu_scene::BalloonClassification>(layer)?;
+                if let Some(bubble) = bubble_target {
+                    edit.remove::<koharu_scene::BalloonClassification>(bubble)?;
+                }
+            }
+            Ok(())
+        })?;
+        self.commit(patch).await
+    }
+
+    pub(crate) async fn guess_page_speakers(
+        &mut self,
+        expected_revision: Revision,
+        page: EntityId,
+    ) -> Result<Commit> {
+        let snapshot = self.snapshot();
+        if snapshot.revision() != expected_revision {
+            bail!(
+                "guess page speakers expected revision {expected_revision}, but the project is at {}",
+                snapshot.revision()
+            );
+        }
+        snapshot.page(page)?;
+        let glossary = snapshot.project_component::<Glossary>()?;
+        let persons: Vec<(GlossaryEntryId, Option<String>, Option<String>)> = glossary
+            .map(|g| {
+                g.entries
+                    .into_iter()
+                    .filter(|e| e.kind == GlossaryKind::Person && e.enabled)
+                    .map(|e| {
+                        let norm_source = koharu_scene::normalize_glossary_source(&e.source);
+                        let valid_source = (!norm_source.is_empty()
+                            && (norm_source.chars().count() >= 2
+                                || norm_source.chars().any(is_cjk_char)))
+                        .then_some(norm_source);
+                        let valid_trans = e.translation.as_deref().and_then(|t| {
+                            let norm_trans = koharu_scene::normalize_glossary_source(t);
+                            (norm_trans.chars().count() >= 2).then_some(norm_trans)
+                        });
+                        (e.id, valid_source, valid_trans)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let descendants: HashSet<EntityId> =
+            snapshot.descendants(page)?.map(|e| e.id()).collect();
+        let patch = snapshot.patch(|edit| {
+            let mut generation = Generation::new(ProducerId::new("dev.koharu.app.guess-speakers")?);
+            generation.model = Some("speaker-guess".to_owned());
+            let mut visited = HashSet::new();
+            for text_layer in snapshot.text_layers()? {
+                let id = text_layer.id();
+                if !visited.insert(id) || !descendants.contains(&id) {
+                    continue;
+                }
+                if text_layer.speaker()?.and_then(|s| s.speaker).is_some() {
+                    continue;
+                }
+                let content = text_layer.content()?;
+                let norm_source = content
+                    .source()?
+                    .map(|s| koharu_scene::normalize_glossary_source(&s.text.value))
+                    .unwrap_or_default();
+                let norm_trans = content
+                    .translation()?
+                    .map(|t| koharu_scene::normalize_glossary_source(&t.text.value))
+                    .unwrap_or_default();
+
+                let mut matched_id: Option<GlossaryEntryId> = None;
+                let mut match_count = 0usize;
+                for (entry_id, entry_source, entry_trans) in &persons {
+                    let source_matches = entry_source
+                        .as_ref()
+                        .is_some_and(|src| !norm_source.is_empty() && norm_source.contains(src));
+                    let trans_matches = entry_trans
+                        .as_ref()
+                        .is_some_and(|tr| !norm_trans.is_empty() && norm_trans.contains(tr));
+                    if source_matches || trans_matches {
+                        matched_id = Some(*entry_id);
+                        match_count += 1;
+                        if match_count > 1 {
+                            break;
+                        }
+                    }
+                }
+                if match_count == 1
+                    && let Some(speaker_id) = matched_id
+                {
+                    edit.set_speaker(
+                        text_layer.id(),
+                        Some(speaker_id),
+                        Origin::Generated(generation.clone()),
+                    )?;
+                }
+            }
+            Ok(())
+        })?;
+        self.commit(patch).await
+    }
+
 pub(crate) async fn rename_page(&mut self, page: EntityId, label: String) -> Result<Commit> {
         let snapshot = self.snapshot();
         let current = snapshot.page(page)?.page()?;
@@ -593,7 +940,7 @@ pub(crate) async fn rename_page(&mut self, page: EntityId, label: String) -> Res
             .await;
         let patch = snapshot.patch(|edit| {
             for page in pages {
-                edit.remove_entity(page, RemovePolicy::Cascade)?;
+                edit.remove_entity_if_present(page, RemovePolicy::Cascade)?;
             }
             Ok(())
         })?;
@@ -623,7 +970,7 @@ pub(crate) async fn rename_page(&mut self, page: EntityId, label: String) -> Res
                 .await;
             let patch = snapshot.patch(|edit| {
                 for page in folder_pages {
-                    edit.remove_entity(page, RemovePolicy::Cascade)?;
+                    edit.remove_entity_if_present(page, RemovePolicy::Cascade)?;
                 }
                 Ok(())
             })?;
@@ -640,6 +987,7 @@ pub(crate) async fn rename_page(&mut self, page: EntityId, label: String) -> Res
                 timestamp,
                 chapter: Some(name.clone()),
                 pages: Vec::new(),
+                page_ids: folder_pages.clone(),
             };
             let mut items = self.read_trash_items().await.unwrap_or_default();
             items.insert(0, item);
@@ -731,27 +1079,26 @@ pub(crate) async fn rename_page(&mut self, page: EntityId, label: String) -> Res
             )?;
             layer = Some(added_layer);
             edit.set(added_layer, &geometry)?;
-            let (preferred_font, default_font_size, default_font_weight) =
-                koharu_renderer::TypesettingConfig::load()
-                    .ok()
-                    .and_then(|config| {
-                        config.read().ok().map(|read| {
-                            let font = read
-                                .dialogue_font
-                                .as_ref()
-                                .filter(|f| !f.trim().is_empty())
-                                .cloned()
-                                .or_else(|| read.font_families.first().cloned());
-                            (font, read.font_size.map(|s| s as f32), read.font_weight)
-                        })
+            let (preferred_font, default_font_size) = koharu_renderer::TypesettingConfig::load()
+                .ok()
+                .and_then(|config| {
+                    config.read().ok().map(|read| {
+                        let font = read
+                            .dialogue_font
+                            .as_ref()
+                            .filter(|f| !f.trim().is_empty())
+                            .cloned()
+                            .or_else(|| read.font_families.first().cloned());
+                        (font, read.font_size.map(|s| s as f32))
                     })
-                    .unwrap_or((None, None, None));
+                })
+                .unwrap_or((None, None));
             edit.set(
                 added_layer,
                 &SceneTypography {
                     origin: Origin::User,
                     preferred_font,
-                    font_weight: default_font_weight,
+                    font_weight: None,
                     font_style: None,
                     size: default_font_size,
                     auto_fit: default_font_size.is_none(),
@@ -955,29 +1302,25 @@ pub(crate) async fn rename_page(&mut self, page: EntityId, label: String) -> Res
             }
         }
         let layers = Self::unique_roots(&snapshot, expanded)?;
-        let mut orphaned_contents = Vec::new();
+        let mut orphaned_contents = BTreeSet::new();
         for layer in &layers {
             let Some(relation) = snapshot.relation_from::<Presents>(*layer)? else {
                 continue;
             };
             let content = relation.value().target;
             if snapshot.relations_to_as::<Presents>(content).count() == 1 {
-                orphaned_contents.push(content);
+                orphaned_contents.insert(content);
             }
         }
         let patch = snapshot.patch(|edit| {
             for layer in layers {
                 if snapshot.page(layer).is_ok() {
-                    return Err(koharu_scene::Error::Invalid(
-                        "delete pages with delete_pages".to_owned(),
-                    ));
+                    continue;
                 }
                 edit.remove_entity(layer, RemovePolicy::Cascade)?;
             }
             for content in orphaned_contents {
-                if snapshot.entity(content).is_ok() {
-                    edit.remove_entity(content, RemovePolicy::Cascade)?;
-                }
+                edit.remove_entity(content, RemovePolicy::Cascade)?;
             }
             Ok(())
         })?;
@@ -1224,7 +1567,7 @@ pub(crate) async fn rename_page(&mut self, page: EntityId, label: String) -> Res
         Ok(Some(self.commit(patch).await?))
     }
 
-    async fn commit(&mut self, patch: koharu_scene::Patch) -> Result<Commit> {
+    pub(crate) async fn commit(&mut self, patch: koharu_scene::Patch) -> Result<Commit> {
         Ok(self.session.commit(patch).await?)
     }
 
@@ -1318,6 +1661,8 @@ pub(crate) async fn rename_page(&mut self, page: EntityId, label: String) -> Res
             let source_region = content.source_region()?.map(|region| region.id());
             let automatic_region = text_layer.automatic_target()?.map(|region| region.id());
             let typography = text_layer.typography()?.map(Self::typography_view);
+            let speaker = text_layer.speaker()?.or(content.speaker()?).and_then(|s| s.speaker);
+            let balloon_shape = text_layer.balloon_classification()?.map(|b| b.shape);
             return Ok(Layer::Text {
                 id: layer,
                 parent,
@@ -1336,6 +1681,8 @@ pub(crate) async fn rename_page(&mut self, page: EntityId, label: String) -> Res
                 typography,
                 layout: layout.kind,
                 automatic_region,
+                speaker,
+                balloon_shape,
             });
         }
         if let Some(raster) = snapshot.component::<SceneRasterLayer>(layer)? {
@@ -1537,6 +1884,17 @@ pub(crate) async fn rename_page(&mut self, page: EntityId, label: String) -> Res
             .into(),
         })
     }
+}
+
+fn is_cjk_char(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x3040..=0x30FF
+            | 0x3400..=0x4DBF
+            | 0x4E00..=0x9FFF
+            | 0xF900..=0xFAFF
+            | 0xAC00..=0xD7AF
+    )
 }
 
 fn validate_project_name(name: &str) -> Result<String> {
@@ -1839,5 +2197,301 @@ mod tests {
             &[ScenePoint { x: 2.0, y: 2.0 }],
         );
         assert_eq!(white.get_pixel(2, 2).0, [255, 255, 255, 255]);
+    }
+
+    #[tokio::test]
+    async fn project_library_multi_root_listing_and_deletion() {
+        let root1 = tempfile::tempdir().unwrap();
+        let root2 = tempfile::tempdir().unwrap();
+
+        let lib = ProjectLibrary::memory(root1.path().to_path_buf(), vec![root2.path().to_path_buf()]);
+
+        let proj1 = lib.create("ProjectOne").await.unwrap();
+        assert_eq!(proj1.name, "ProjectOne");
+
+        let proj2_dir = root2.path().join("ProjectTwo.khrproj");
+        std::fs::create_dir_all(&proj2_dir).unwrap();
+        std::fs::write(proj2_dir.join("state-a.khr"), b"state").unwrap();
+
+        let list = lib.list().unwrap();
+        assert_eq!(list.len(), 2);
+        assert!(list.iter().any(|p| p.name == "ProjectOne"));
+        assert!(list.iter().any(|p| p.name == "ProjectTwo"));
+
+        lib.delete(&proj2_dir).unwrap();
+        assert!(!proj2_dir.exists());
+
+        let list_after = lib.list().unwrap();
+        assert_eq!(list_after.len(), 1);
+        assert_eq!(list_after[0].name, "ProjectOne");
+    }
+
+    #[tokio::test]
+    async fn project_library_identically_named_projects_across_roots() {
+        let root1 = tempfile::tempdir().unwrap();
+        let root2 = tempfile::tempdir().unwrap();
+
+        let lib = ProjectLibrary::memory(root1.path().to_path_buf(), vec![root2.path().to_path_buf()]);
+
+        let p1_dir = root1.path().join("SameName.khrproj");
+        std::fs::create_dir_all(&p1_dir).unwrap();
+        std::fs::write(p1_dir.join("state-a.khr"), b"state1").unwrap();
+
+        let p2_dir = root2.path().join("SameName.khrproj");
+        std::fs::create_dir_all(&p2_dir).unwrap();
+        std::fs::write(p2_dir.join("state-a.khr"), b"state2").unwrap();
+
+        let list = lib.list().unwrap();
+        assert_eq!(list.len(), 2);
+
+        lib.delete(&p2_dir).unwrap();
+        assert!(!p2_dir.exists());
+        assert!(p1_dir.exists());
+
+        let list_after = lib.list().unwrap();
+        assert_eq!(list_after.len(), 1);
+        assert_eq!(list_after[0].path, p1_dir);
+    }
+
+    #[tokio::test]
+    async fn set_balloon_shape_updates_layer_and_bubble_without_stamping_user_typography() {
+        use koharu_scene::{BalloonClassification, BalloonShape, BubbleRegion, FlowsIn, TextLayoutKind};
+
+        let mut session = Session::memory().await.unwrap();
+        let generation = Generation::new(ProducerId::new("dev.koharu.pipeline.detection").unwrap());
+        let mut ids = None;
+        let setup = session
+            .snapshot()
+            .patch(|edit| {
+                let page = edit.add_page(PageDraft::new("p1", 100.0, 100.0), At::End)?;
+                let bubble = edit.add_analysis_region::<BubbleRegion>(
+                    page,
+                    At::End,
+                    &SceneGeometry::rectangle(10.0, 10.0, 50.0, 50.0),
+                    Some("bubble".to_owned()),
+                )?;
+                let content = edit.add_text_content(page, At::End)?;
+                let layer = edit.add_text_layer(
+                    page,
+                    At::End,
+                    content,
+                    &SceneTextLayout {
+                        origin: Origin::Generated(generation.clone()),
+                        kind: TextLayoutKind::Paragraph,
+                        angle_degrees: None,
+                    },
+                )?;
+                edit.relate::<FlowsIn>(layer, bubble)?;
+                edit.set(
+                    layer,
+                    &SceneTypography {
+                        origin: Origin::Generated(generation),
+                        preferred_font: None,
+                        font_weight: None,
+                        font_style: None,
+                        size: None,
+                        auto_fit: true,
+                        color: Some([10, 20, 30, 255]),
+                        stroke_color: None,
+                        stroke_width: None,
+                        alignment: None,
+                        writing_mode: None,
+                        extensions: Default::default(),
+                    },
+                )?;
+                ids = Some((layer, bubble));
+                Ok(())
+            })
+            .unwrap();
+        session.commit(setup).await.unwrap();
+        let (layer, bubble) = ids.unwrap();
+        let mut project = Project::new_test(session, "test".to_owned());
+
+        let commit = project
+            .set_balloon_shape(project.revision(), layer, Some(BalloonShape::Shout))
+            .await
+            .unwrap();
+        let layer_class = commit
+            .snapshot
+            .component::<BalloonClassification>(layer)
+            .unwrap()
+            .unwrap();
+        assert_eq!(layer_class.shape, BalloonShape::Shout);
+        assert_eq!(layer_class.origin, Origin::User);
+        let bubble_class = commit
+            .snapshot
+            .component::<BalloonClassification>(bubble)
+            .unwrap()
+            .unwrap();
+        assert_eq!(bubble_class.shape, BalloonShape::Shout);
+        assert_eq!(bubble_class.origin, Origin::User);
+
+        let typo = commit
+            .snapshot
+            .component::<SceneTypography>(layer)
+            .unwrap()
+            .unwrap();
+        assert!(matches!(typo.origin, Origin::Generated(_)));
+        assert_eq!(typo.stroke_color, None);
+    }
+
+    #[tokio::test]
+    async fn guess_page_speakers_assigns_only_unique_person_matches_without_first_person_substrings() {
+        use koharu_scene::{
+            Authored, CharacterGender, CharacterProfile, Glossary, GlossaryEntry, GlossaryEntryId,
+            GlossaryKind, GlossaryValueOrigin, SourceText, Speaker, TextLayoutKind, Translation,
+        };
+
+        let alice_id = GlossaryEntryId::new();
+        let bob_id = GlossaryEntryId::new();
+        let glossary = Glossary {
+            enabled: true,
+            source_language: None,
+            target_language: None,
+            source_fingerprint: None,
+            entries: vec![
+                GlossaryEntry {
+                    id: alice_id,
+                    source: "アリス".to_owned(),
+                    translation: Some("Alice".to_owned()),
+                    kind: GlossaryKind::Person,
+                    enabled: true,
+                    confidence: None,
+                    occurrence_count: 1,
+                    examples: Vec::new(),
+                    source_origin: GlossaryValueOrigin::User,
+                    translation_origin: Some(GlossaryValueOrigin::User),
+                    present_in_last_scan: false,
+                    character: Some(CharacterProfile {
+                        id: alice_id,
+                        gender: CharacterGender::Female,
+                        first_person: Some("I".to_owned()),
+                        second_person: None,
+                        tone: None,
+                        custom_instructions: None,
+                        honorific_policy: None,
+                    }),
+                    forbidden_variants: Vec::new(),
+                },
+                GlossaryEntry {
+                    id: bob_id,
+                    source: "ボブ".to_owned(),
+                    translation: Some("Bob".to_owned()),
+                    kind: GlossaryKind::Person,
+                    enabled: true,
+                    confidence: None,
+                    occurrence_count: 1,
+                    examples: Vec::new(),
+                    source_origin: GlossaryValueOrigin::User,
+                    translation_origin: Some(GlossaryValueOrigin::User),
+                    present_in_last_scan: false,
+                    character: None,
+                    forbidden_variants: Vec::new(),
+                },
+            ],
+        };
+
+        let mut session = Session::memory().await.unwrap();
+        let mut ids = None;
+        let setup = session
+            .snapshot()
+            .patch(|edit| {
+                edit.set_project(&glossary)?;
+                let page = edit.add_page(PageDraft::new("p1", 100.0, 100.0), At::End)?;
+
+                let c_unique = edit.add_text_content(page, At::End)?;
+                edit.set(
+                    c_unique,
+                    &SourceText {
+                        text: Authored::user("アリスが行く".to_owned()),
+                        language: None,
+                    },
+                )?;
+                let l_unique = edit.add_text_layer(
+                    page,
+                    At::End,
+                    c_unique,
+                    &SceneTextLayout {
+                        origin: Origin::User,
+                        kind: TextLayoutKind::Paragraph,
+                        angle_degrees: None,
+                    },
+                )?;
+
+                let c_ambig = edit.add_text_content(page, At::End)?;
+                edit.set(
+                    c_ambig,
+                    &SourceText {
+                        text: Authored::user("アリスとボブ".to_owned()),
+                        language: None,
+                    },
+                )?;
+                let l_ambig = edit.add_text_layer(
+                    page,
+                    At::End,
+                    c_ambig,
+                    &SceneTextLayout {
+                        origin: Origin::User,
+                        kind: TextLayoutKind::Paragraph,
+                        angle_degrees: None,
+                    },
+                )?;
+
+                let c_pronoun = edit.add_text_content(page, At::End)?;
+                edit.set(c_pronoun, &SourceText { text: Authored::user("ここにいる".to_owned()), language: None })?;
+                edit.set(
+                    c_pronoun,
+                    &Translation {
+                        text: Authored::user("I am here".to_owned()),
+                        language: None,
+                    },
+                )?;
+                let l_pronoun = edit.add_text_layer(
+                    page,
+                    At::End,
+                    c_pronoun,
+                    &SceneTextLayout {
+                        origin: Origin::User,
+                        kind: TextLayoutKind::Paragraph,
+                        angle_degrees: None,
+                    },
+                )?;
+
+                ids = Some((page, l_unique, l_ambig, l_pronoun));
+                Ok(())
+            })
+            .unwrap();
+        session.commit(setup).await.unwrap();
+        let (page, l_unique, l_ambig, l_pronoun) = ids.unwrap();
+        let mut project = Project::new_test(session, "test".to_owned());
+
+        let commit = project
+            .guess_page_speakers(project.revision(), page)
+            .await
+            .unwrap();
+        assert_eq!(
+            commit
+                .snapshot
+                .component::<Speaker>(l_unique)
+                .unwrap()
+                .and_then(|s| s.speaker),
+            Some(alice_id)
+        );
+        assert_eq!(
+            commit
+                .snapshot
+                .component::<Speaker>(l_ambig)
+                .unwrap()
+                .and_then(|s| s.speaker),
+            None
+        );
+        assert_eq!(
+            commit
+                .snapshot
+                .component::<Speaker>(l_pronoun)
+                .unwrap()
+                .and_then(|s| s.speaker),
+            None
+        );
     }
 }

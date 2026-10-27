@@ -1,6 +1,6 @@
 use anyhow::Context as _;
 use koharu_desktop::{CanvasState, Desktop};
-use koharu_scene::EntityId;
+use koharu_scene::{BalloonShape, EntityId, GlossaryEntryId, Revision};
 use serde::Deserialize;
 use specta::Type;
 use tauri::State;
@@ -8,6 +8,7 @@ use tauri::State;
 use super::{
     ChannelExt as _, Error,
     canvas::{CanvasChannel, Point},
+    lifecycle::ProjectChannel,
     project::{CurrentProject, Page, Project, Typography},
 };
 pub(crate) async fn synchronize_canvas(
@@ -394,9 +395,82 @@ pub(crate) async fn set_page_chapter(
     page: EntityId,
     chapter: Option<String>,
     project: State<'_, CurrentProject>,
+    project_channel: State<'_, ProjectChannel>,
 ) -> std::result::Result<(), Error> {
-    let mut project = project.project.lock().await;
-    let project = project.as_mut().context("no project is open")?;
-    project.set_page_chapter(page, chapter).await?;
+    let info = {
+        let mut project = project.project.lock().await;
+        let project = project.as_mut().context("no project is open")?;
+        let commit = project.set_page_chapter(page, chapter).await?;
+        project.record_commit(&commit);
+        project.info()
+    };
+    project_channel.channel.publish(Some(info));
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn set_bubble_speaker(
+    expected_revision: Revision,
+    layer: EntityId,
+    speaker: Option<GlossaryEntryId>,
+    desktop: State<'_, Desktop>,
+    project: State<'_, CurrentProject>,
+    canvas_channel: State<'_, CanvasChannel>,
+) -> Result<(), Error> {
+    let (commit, page) = {
+        let mut project = project.project.lock().await;
+        let project = project.as_mut().context("no project is open")?;
+        let commit = project.set_bubble_speaker(expected_revision, layer, speaker).await?;
+        project.record_commit(&commit);
+        (commit, project.active_page())
+    };
+    let canvas = synchronize_canvas(&desktop, &commit, page).await?;
+    canvas_channel.channel.publish(canvas);
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn guess_page_speakers(
+    expected_revision: Revision,
+    page: EntityId,
+    desktop: State<'_, Desktop>,
+    project: State<'_, CurrentProject>,
+    canvas_channel: State<'_, CanvasChannel>,
+) -> Result<(), Error> {
+    let (commit, active_page) = {
+        let mut project = project.project.lock().await;
+        let project = project.as_mut().context("no project is open")?;
+        let commit = project.guess_page_speakers(expected_revision, page).await?;
+        project.record_commit(&commit);
+        (commit, project.active_page())
+    };
+    let canvas = synchronize_canvas(&desktop, &commit, active_page).await?;
+    canvas_channel.channel.publish(canvas);
+    Ok(())
+}
+
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn set_balloon_shape(
+    expected_revision: Revision,
+    layer: EntityId,
+    shape: Option<BalloonShape>,
+    desktop: State<'_, Desktop>,
+    project: State<'_, CurrentProject>,
+    canvas_channel: State<'_, CanvasChannel>,
+) -> Result<(), Error> {
+    let (commit, page) = {
+        let mut project = project.project.lock().await;
+        let project = project.as_mut().context("no project is open")?;
+        let commit = project
+            .set_balloon_shape(expected_revision, layer, shape)
+            .await?;
+        project.record_commit(&commit);
+        (commit, project.active_page())
+    };
+    let canvas = synchronize_canvas(&desktop, &commit, page).await?;
+    canvas_channel.channel.publish(canvas);
     Ok(())
 }

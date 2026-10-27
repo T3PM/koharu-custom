@@ -2,8 +2,8 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context as _, Result, bail};
 use koharu_scene::{
-    Glossary, GlossaryEntry, GlossaryEntryId, GlossaryKind, GlossaryValueOrigin, LanguageTag,
-    Revision, Snapshot, normalize_glossary_source,
+    CharacterProfile, Glossary, GlossaryEntry, GlossaryEntryId, GlossaryKind, GlossaryValueOrigin,
+    LanguageTag, Revision, Snapshot, normalize_glossary_source,
 };
 use serde::{Deserialize, Serialize};
 use specta::Type;
@@ -30,6 +30,10 @@ pub(crate) struct GlossaryExchangeEntry {
     pub translation: Option<String>,
     pub kind: GlossaryKind,
     pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub character: Option<CharacterProfile>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub forbidden_variants: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize, Type)]
@@ -79,6 +83,8 @@ impl crate::commands::project::Project {
                     translation: entry.translation,
                     kind: entry.kind,
                     enabled: entry.enabled,
+                    character: entry.character,
+                    forbidden_variants: entry.forbidden_variants,
                 })
                 .collect(),
         };
@@ -140,6 +146,7 @@ impl crate::commands::project::Project {
                         && !semantic_equal(&glossary.entries[index], &imported)
                     {
                         let entry = &mut glossary.entries[index];
+                        let id = entry.id;
                         entry.source = imported.source;
                         entry.translation_origin = imported
                             .translation
@@ -149,14 +156,20 @@ impl crate::commands::project::Project {
                         entry.kind = imported.kind;
                         entry.enabled = imported.enabled;
                         entry.source_origin = GlossaryValueOrigin::Imported;
+                        entry.character = imported.character.map(|mut c| {
+                            c.id = id;
+                            c
+                        });
+                        entry.forbidden_variants = imported.forbidden_variants;
                     }
                     continue;
                 }
 
                 let index = glossary.entries.len();
                 existing.insert(key, index);
+                let id = GlossaryEntryId::new();
                 glossary.entries.push(GlossaryEntry {
-                    id: GlossaryEntryId::new(),
+                    id,
                     source: imported.source,
                     translation_origin: imported
                         .translation
@@ -170,6 +183,11 @@ impl crate::commands::project::Project {
                     examples: Vec::new(),
                     source_origin: GlossaryValueOrigin::Imported,
                     present_in_last_scan: false,
+                    character: imported.character.map(|mut c| {
+                        c.id = id;
+                        c
+                    }),
+                    forbidden_variants: imported.forbidden_variants,
                 });
             }
             Ok(())
@@ -238,21 +256,29 @@ fn validate_exchange(snapshot: &Snapshot, imported: &GlossaryExchange) -> Result
         entries: imported
             .entries
             .iter()
-            .map(|entry| GlossaryEntry {
-                id: GlossaryEntryId::new(),
-                source: entry.source.clone(),
-                translation: entry.translation.clone(),
-                kind: entry.kind,
-                enabled: entry.enabled,
-                confidence: None,
-                occurrence_count: 0,
-                examples: Vec::new(),
-                source_origin: GlossaryValueOrigin::Imported,
-                translation_origin: entry
-                    .translation
-                    .as_ref()
-                    .map(|_| GlossaryValueOrigin::Imported),
-                present_in_last_scan: false,
+            .map(|entry| {
+                let id = GlossaryEntryId::new();
+                GlossaryEntry {
+                    id,
+                    source: entry.source.clone(),
+                    translation: entry.translation.clone(),
+                    kind: entry.kind,
+                    enabled: entry.enabled,
+                    confidence: None,
+                    occurrence_count: 0,
+                    examples: Vec::new(),
+                    source_origin: GlossaryValueOrigin::Imported,
+                    translation_origin: entry
+                        .translation
+                        .as_ref()
+                        .map(|_| GlossaryValueOrigin::Imported),
+                    present_in_last_scan: false,
+                    character: entry.character.clone().map(|mut c| {
+                        c.id = id;
+                        c
+                    }),
+                    forbidden_variants: entry.forbidden_variants.clone(),
+                }
             })
             .collect(),
     };
@@ -284,10 +310,24 @@ fn language_mismatches(current: &Glossary, imported: &GlossaryExchange) -> Vec<L
 }
 
 fn semantic_equal(existing: &GlossaryEntry, imported: &GlossaryExchangeEntry) -> bool {
+    let character_equal = match (&existing.character, &imported.character) {
+        (None, None) => true,
+        (Some(a), Some(b)) => {
+            a.gender == b.gender
+                && a.first_person == b.first_person
+                && a.second_person == b.second_person
+                && a.tone == b.tone
+                && a.custom_instructions == b.custom_instructions
+                && a.honorific_policy == b.honorific_policy
+        }
+        _ => false,
+    };
     existing.source == imported.source
         && existing.translation == imported.translation
         && existing.kind == imported.kind
         && existing.enabled == imported.enabled
+        && existing.forbidden_variants == imported.forbidden_variants
+        && character_equal
 }
 
 #[cfg(test)]
@@ -321,6 +361,8 @@ mod tests {
             source_origin: GlossaryValueOrigin::Detected,
             translation_origin: translation.map(|_| GlossaryValueOrigin::Automatic),
             present_in_last_scan: true,
+            character: None,
+            forbidden_variants: Vec::new(),
         }
     }
 
@@ -530,5 +572,61 @@ mod tests {
         assert_eq!(view.entries[0].translation, None);
         assert_eq!(view.entries[0].translation_origin, None);
         assert_eq!(view.entries[0].source_origin, untranslated.source_origin);
+    }
+
+    #[tokio::test]
+    async fn export_and_import_preserve_character_profile() {
+        use koharu_scene::{CharacterGender, CharacterProfile};
+
+        let mut alice = entry("アリス", Some("Alice"), GlossaryKind::Person, true);
+        alice.character = Some(CharacterProfile {
+            id: alice.id,
+            gender: CharacterGender::Female,
+            first_person: Some("私".to_owned()),
+            second_person: Some("あなた".to_owned()),
+            tone: Some("polite".to_owned()),
+            custom_instructions: Some("Uses desu/masu".to_owned()),
+            honorific_policy: Some("keep".to_owned()),
+        });
+        let source_project = project_with(Glossary {
+            enabled: true,
+            source_language: Some(LanguageTag::new("ja").unwrap()),
+            target_language: Some(LanguageTag::new("en").unwrap()),
+            source_fingerprint: None,
+            entries: vec![alice.clone()],
+        })
+        .await;
+
+        let exported_json = source_project.export_glossary_json().unwrap();
+        let mut target_project = project_with(Glossary {
+            enabled: true,
+            source_language: Some(LanguageTag::new("ja").unwrap()),
+            target_language: Some(LanguageTag::new("en").unwrap()),
+            source_fingerprint: None,
+            entries: Vec::new(),
+        })
+        .await;
+
+        let view = target_project
+            .apply_glossary_import(
+                target_project.revision(),
+                &exported_json,
+                GlossaryImportStrategy::ReplaceExisting,
+                false,
+            )
+            .await
+            .unwrap();
+        assert_eq!(view.entries.len(), 1);
+        let imported_char = view.entries[0].character.as_ref().unwrap();
+        assert_eq!(imported_char.id, view.entries[0].id);
+        assert_eq!(imported_char.gender, CharacterGender::Female);
+        assert_eq!(imported_char.first_person.as_deref(), Some("私"));
+        assert_eq!(imported_char.second_person.as_deref(), Some("あなた"));
+        assert_eq!(imported_char.tone.as_deref(), Some("polite"));
+        assert_eq!(
+            imported_char.custom_instructions.as_deref(),
+            Some("Uses desu/masu")
+        );
+        assert_eq!(imported_char.honorific_policy.as_deref(), Some("keep"));
     }
 }

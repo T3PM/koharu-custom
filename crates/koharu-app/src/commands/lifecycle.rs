@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use anyhow::{Context as _, Result};
 use koharu_desktop::{CanvasState, Desktop};
 use koharu_scene::{AssetInput, AssetMetadata, AssetRole, At, PageDraft};
@@ -256,6 +257,42 @@ pub(crate) async fn list_projects(
     Ok(library.list()?)
 }
 
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn list_workspace_directories(
+    library: State<'_, ProjectLibrary>,
+) -> std::result::Result<Vec<String>, Error> {
+    Ok(library.list_workspace_directories()?)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn add_workspace_directory(
+    path: String,
+    library: State<'_, ProjectLibrary>,
+) -> std::result::Result<Vec<String>, Error> {
+    Ok(library.add_workspace_directory(&path)?)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn remove_workspace_directory(
+    path: String,
+    library: State<'_, ProjectLibrary>,
+) -> std::result::Result<Vec<String>, Error> {
+    Ok(library.remove_workspace_directory(&path)?)
+}
+
+#[tauri::command]
+#[specta::specta]
+pub(crate) async fn set_primary_workspace_directory(
+    path: String,
+    library: State<'_, ProjectLibrary>,
+) -> std::result::Result<(), Error> {
+    library.set_primary_workspace_directory(&path)?;
+    Ok(())
+}
+
 #[tracing::instrument(
     target = "koharu_metrics",
     name = "project_created",
@@ -283,11 +320,11 @@ pub(crate) async fn create_project(
 #[tauri::command]
 #[specta::specta]
 pub(crate) async fn open_project(
-    name: String,
+    path: PathBuf,
     handle: AppHandle<CefRuntime>,
 ) -> std::result::Result<(), Error> {
     let library = handle.state::<ProjectLibrary>().inner().clone();
-    let opened = library.open(&name).await?;
+    let opened = library.open(&path).await?;
     replace_project(&handle, opened).await?;
     Ok(())
 }
@@ -314,7 +351,7 @@ pub(crate) async fn close_project(handle: AppHandle<CefRuntime>) -> std::result:
 #[tauri::command]
 #[specta::specta]
 pub(crate) async fn delete_project(
-    name: String,
+    path: PathBuf,
     handle: AppHandle<CefRuntime>,
 ) -> std::result::Result<(), Error> {
     let active = handle
@@ -323,12 +360,12 @@ pub(crate) async fn delete_project(
         .lock()
         .await
         .as_ref()
-        .is_some_and(|project| project.name == name);
+        .is_some_and(|project| project.path == path);
     if active {
         close_current_project(&handle).await?;
     }
     let library = handle.state::<ProjectLibrary>().inner().clone();
-    tokio::task::spawn_blocking(move || library.delete(&name))
+    tokio::task::spawn_blocking(move || library.delete(&path))
         .await
         .context("project deletion task failed")??;
     Ok(())
@@ -391,7 +428,7 @@ pub(crate) async fn import(
         }),
         PageImportSource::Folder => dialog.pick_folder().await.map(|folder| {
             let root = folder.path();
-            WalkDir::new(root)
+            let mut entries = WalkDir::new(root)
                 .follow_links(false)
                 .into_iter()
                 .filter_map(|entry| match entry {
@@ -416,7 +453,9 @@ pub(crate) async fn import(
                         .map(|parent| parent.to_string_lossy().into_owned());
                     import::ImportEntry { path, chapter }
                 })
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>();
+            alphanumeric_sort::sort_slice_by_os_str_key(&mut entries, |entry| entry.path.as_os_str());
+            entries
         }),
     };
     let Some(files) = files else {

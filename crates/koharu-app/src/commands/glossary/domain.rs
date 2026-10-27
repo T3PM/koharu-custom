@@ -2,10 +2,21 @@ use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context as _, Result, bail};
 use koharu_scene::{
-    EntityId, GLOSSARY_EXAMPLE_MAX_CHARS, GLOSSARY_MAX_EXAMPLES, GLOSSARY_TEXT_MAX_CHARS, Glossary,
-    GlossaryEntry, GlossaryEntryId, GlossaryKind, GlossaryValueOrigin, LanguageTag, Revision,
-    Snapshot, SourceText, normalize_glossary_source,
+    CharacterProfile, EntityId, GLOSSARY_EXAMPLE_MAX_CHARS, GLOSSARY_MAX_EXAMPLES,
+    GLOSSARY_TEXT_MAX_CHARS, Glossary, GlossaryEntry, GlossaryEntryId, GlossaryKind,
+    GlossaryValueOrigin, LanguageTag, Origin, Revision, Snapshot, SourceText, Speaker,
+    normalize_glossary_source,
 };
+
+use super::scan::GlossaryScanInput;
+
+pub(crate) const JP_HONORIFICS: &[&str] = &[
+    "さん", "ちゃん", "くん", "君", "さま", "様", "先生", "せんせい", "先輩", "せんぱい", "氏", "殿", "たん",
+];
+pub(crate) const LATIN_HONORIFICS: &[&str] = &[
+    "-san", "-chan", "-kun", "-sama", "-senpai", "-sensei", "-dono", "-tan", "-shi",
+];
+pub(crate) const KATA_HONORIFICS: &[&str] = &["サン", "チャン", "クン", "サマ", "センパイ", "センセイ"];
 use serde::{Deserialize, Serialize};
 use specta::Type;
 
@@ -33,6 +44,33 @@ pub(crate) struct GlossaryView {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Type)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct GlossaryScanReport {
+    pub glossary: GlossaryView,
+    pub summary: GlossaryScanSummary,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Type)]
+#[serde(
+    tag = "status",
+    rename_all = "snake_case",
+    rename_all_fields = "camelCase"
+)]
+pub(crate) enum GlossaryScanSummary {
+    NoSourceText,
+    NoTermsFound {
+        source_text_count: u32,
+    },
+    Updated {
+        source_text_count: u32,
+        candidate_occurrence_count: u32,
+        distinct_term_count: u32,
+        added_entry_count: u32,
+        matched_entry_count: u32,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Type)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct GlossaryEntryView {
     pub revision: Revision,
     pub id: GlossaryEntryId,
@@ -46,6 +84,9 @@ pub(crate) struct GlossaryEntryView {
     pub source_origin: GlossaryValueOrigin,
     pub translation_origin: Option<GlossaryValueOrigin>,
     pub present_in_last_scan: bool,
+    pub character: Option<CharacterProfile>,
+    #[serde(default)]
+    pub forbidden_variants: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, Type)]
@@ -55,6 +96,9 @@ pub(crate) struct GlossaryEntryDraft {
     pub translation: Option<String>,
     pub kind: GlossaryKind,
     pub enabled: bool,
+    pub character: Option<CharacterProfile>,
+    #[serde(default)]
+    pub forbidden_variants: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, Type)]
@@ -64,6 +108,9 @@ pub(crate) struct GlossaryEntryPatch {
     pub translation: Option<String>,
     pub kind: GlossaryKind,
     pub enabled: bool,
+    pub character: Option<CharacterProfile>,
+    #[serde(default)]
+    pub forbidden_variants: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, Type)]
@@ -75,7 +122,7 @@ pub(crate) struct ScanCandidate {
 }
 
 impl ScanCandidate {
-    fn validate(&self) -> Result<()> {
+    pub(crate) fn validate(&self) -> Result<()> {
         validate_scan_text(&self.source, GLOSSARY_TEXT_MAX_CHARS, false, "source")?;
         if !self.confidence.is_finite() || !(0.0..=1.0).contains(&self.confidence) {
             bail!("glossary confidence is invalid");
@@ -105,12 +152,22 @@ pub(super) fn normalize_glossary_translation(translation: Option<String>) -> Opt
     })
 }
 
+fn normalize_forbidden_variants(variants: Vec<String>) -> Vec<String> {
+    variants
+        .into_iter()
+        .map(|variant| variant.trim().to_owned())
+        .filter(|variant| !variant.is_empty())
+        .collect()
+}
+
 fn normalize_glossary_translations(glossary: &mut Glossary) {
     for entry in &mut glossary.entries {
         entry.translation = normalize_glossary_translation(entry.translation.take());
         if entry.translation.is_none() {
             entry.translation_origin = None;
         }
+        entry.forbidden_variants =
+            normalize_forbidden_variants(std::mem::take(&mut entry.forbidden_variants));
     }
 }
 
@@ -195,6 +252,8 @@ fn glossary_view(snapshot: &Snapshot) -> Result<GlossaryView> {
                 source_origin: entry.source_origin,
                 translation_origin: entry.translation_origin,
                 present_in_last_scan: entry.present_in_last_scan,
+                character: entry.character,
+                forbidden_variants: entry.forbidden_variants,
             })
             .collect(),
     })
@@ -223,8 +282,16 @@ impl crate::commands::project::Project {
         input: GlossaryEntryDraft,
     ) -> Result<GlossaryView> {
         self.mutate_glossary(expected_revision, |glossary| {
+            let id = GlossaryEntryId::new();
+            let character = input.character.map(|mut c| {
+                c.id = id;
+                c
+            });
+            if let Some(c) = &character {
+                c.validate()?;
+            }
             glossary.entries.push(GlossaryEntry {
-                id: GlossaryEntryId::new(),
+                id,
                 source: input.source,
                 translation_origin: input
                     .translation
@@ -238,6 +305,8 @@ impl crate::commands::project::Project {
                 examples: Vec::new(),
                 source_origin: GlossaryValueOrigin::User,
                 present_in_last_scan: false,
+                character,
+                forbidden_variants: normalize_forbidden_variants(input.forbidden_variants),
             });
             Ok(())
         })
@@ -265,6 +334,53 @@ impl crate::commands::project::Project {
             entry.kind = input.kind;
             entry.enabled = input.enabled;
             entry.source_origin = GlossaryValueOrigin::User;
+            if let Some(mut c) = input.character {
+                c.id = id;
+                c.validate()?;
+                entry.character = Some(c);
+            }
+            entry.forbidden_variants = normalize_forbidden_variants(input.forbidden_variants);
+            Ok(())
+        })
+        .await
+    }
+
+    pub(crate) async fn update_character_profile(
+        &mut self,
+        expected_revision: Revision,
+        entry_id: GlossaryEntryId,
+        profile: Option<CharacterProfile>,
+    ) -> Result<GlossaryView> {
+        self.mutate_glossary(expected_revision, |glossary| {
+            let entry = glossary
+                .entries
+                .iter_mut()
+                .find(|entry| entry.id == entry_id)
+                .context("glossary entry was not found")?;
+            if let Some(mut p) = profile {
+                p.id = entry_id;
+                p.validate()?;
+                entry.character = Some(p);
+            } else {
+                entry.character = None;
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    pub(crate) async fn update_entry_kinds(
+        &mut self,
+        expected_revision: Revision,
+        updates: Vec<(GlossaryEntryId, GlossaryKind)>,
+    ) -> Result<GlossaryView> {
+        let update_map = updates.into_iter().collect::<HashMap<_, _>>();
+        self.mutate_glossary(expected_revision, |glossary| {
+            for entry in &mut glossary.entries {
+                if let Some(&new_kind) = update_map.get(&entry.id) {
+                    entry.kind = new_kind;
+                }
+            }
             Ok(())
         })
         .await
@@ -279,28 +395,48 @@ impl crate::commands::project::Project {
         if ids.is_empty() {
             bail!("at least one glossary entry must be selected for deletion");
         }
-        self.mutate_glossary(expected_revision, |glossary| {
-            let found = glossary
-                .entries
-                .iter()
-                .filter(|entry| ids.contains(&entry.id))
-                .count();
-            if found != ids.len() {
-                bail!("one or more glossary entries were not found");
+        let snapshot = self.snapshot();
+        if snapshot.revision() != expected_revision {
+            bail!(
+                "glossary edit expected revision {expected_revision}, but the project is at {}",
+                snapshot.revision()
+            );
+        }
+        let mut value = glossary(&snapshot)?;
+        let found = value
+            .entries
+            .iter()
+            .filter(|entry| ids.contains(&entry.id))
+            .count();
+        if found != ids.len() {
+            bail!("one or more glossary entries were not found");
+        }
+        value.entries.retain(|entry| !ids.contains(&entry.id));
+        normalize_glossary_translations(&mut value);
+
+        let patch = snapshot.patch(|edit| {
+            edit.set_project(&value)?;
+            for entity in snapshot.entities_with::<Speaker>()? {
+                if let Some(speaker) = snapshot.component::<Speaker>(entity.id())? {
+                    if let Some(entry_id) = speaker.speaker {
+                        if ids.contains(&entry_id) {
+                            edit.set_speaker(entity.id(), None, Origin::User)?;
+                        }
+                    }
+                }
             }
-            glossary.entries.retain(|entry| !ids.contains(&entry.id));
             Ok(())
-        })
-        .await
+        })?;
+        let commit = self.session.commit(patch).await?;
+        self.record_commit(&commit);
+        glossary_view(&commit.snapshot)
     }
 
     pub(crate) async fn apply_glossary_scan(
         &mut self,
         expected_revision: Revision,
-        source_language: Option<LanguageTag>,
-        target_language: Option<LanguageTag>,
-        candidates: Vec<ScanCandidate>,
-    ) -> Result<GlossaryView> {
+        input: GlossaryScanInput,
+    ) -> Result<GlossaryScanReport> {
         #[derive(Debug)]
         struct Aggregate {
             source: String,
@@ -310,10 +446,29 @@ impl crate::commands::project::Project {
             examples: Vec<String>,
         }
 
-        let source_fingerprint = ocr_source_fingerprint(&self.snapshot())?;
+        let snapshot = self.snapshot();
+        if snapshot.revision() != expected_revision {
+            bail!(
+                "glossary scan expected revision {expected_revision}, but the project is at {}",
+                snapshot.revision()
+            );
+        }
+        if input.source_text_count == 0 {
+            if !input.candidates.is_empty() {
+                bail!("glossary scan candidates require OCR text");
+            }
+            return Ok(GlossaryScanReport {
+                glossary: self.glossary_view()?,
+                summary: GlossaryScanSummary::NoSourceText,
+            });
+        }
+
+        let source_fingerprint = ocr_source_fingerprint(&snapshot)?;
+        let candidate_occurrence_count =
+            u32::try_from(input.candidates.len()).context("too many glossary scan matches")?;
         let mut positions = HashMap::<(String, GlossaryKind), usize>::new();
         let mut aggregates = Vec::<Aggregate>::new();
-        for candidate in candidates {
+        for candidate in input.candidates {
             candidate.validate()?;
             let key = (normalize_glossary_source(&candidate.source), candidate.kind);
             if let Some(&index) = positions.get(&key) {
@@ -344,58 +499,84 @@ impl crate::commands::project::Project {
             }
         }
 
-        self.mutate_glossary(expected_revision, |glossary| {
-            glossary.source_language = source_language;
-            glossary.target_language = target_language;
-            glossary.source_fingerprint = Some(source_fingerprint);
-            for entry in &mut glossary.entries {
-                entry.present_in_last_scan = false;
-            }
-
-            let existing = glossary
-                .entries
-                .iter()
-                .enumerate()
-                .map(|(index, entry)| {
-                    (
-                        (normalize_glossary_source(&entry.source), entry.kind),
-                        index,
-                    )
-                })
-                .collect::<HashMap<_, _>>();
-            for aggregate in aggregates {
-                let key = (normalize_glossary_source(&aggregate.source), aggregate.kind);
-                if let Some(&index) = existing.get(&key) {
-                    let entry = &mut glossary.entries[index];
-                    if !matches!(
-                        entry.source_origin,
-                        GlossaryValueOrigin::User | GlossaryValueOrigin::Imported
-                    ) {
-                        entry.source = aggregate.source;
-                    }
-                    entry.confidence = Some(aggregate.confidence);
-                    entry.occurrence_count = aggregate.occurrence_count;
-                    entry.examples = aggregate.examples;
-                    entry.present_in_last_scan = true;
-                } else {
-                    glossary.entries.push(GlossaryEntry {
-                        id: GlossaryEntryId::new(),
-                        source: aggregate.source,
-                        translation: None,
-                        kind: aggregate.kind,
-                        enabled: true,
-                        confidence: Some(aggregate.confidence),
-                        occurrence_count: aggregate.occurrence_count,
-                        examples: aggregate.examples,
-                        source_origin: GlossaryValueOrigin::Detected,
-                        translation_origin: None,
-                        present_in_last_scan: true,
-                    });
+        let distinct_term_count =
+            u32::try_from(aggregates.len()).context("too many distinct glossary scan terms")?;
+        let mut added_entry_count = 0_u32;
+        let mut matched_entry_count = 0_u32;
+        let glossary = self
+            .mutate_glossary(expected_revision, |glossary| {
+                if let Some(source) = input.source_language {
+                    glossary.source_language = Some(source);
                 }
+                glossary.target_language = Some(input.target_language);
+                glossary.source_fingerprint = Some(source_fingerprint);
+                for entry in &mut glossary.entries {
+                    entry.present_in_last_scan = false;
+                }
+
+                let existing = glossary
+                    .entries
+                    .iter()
+                    .enumerate()
+                    .map(|(index, entry)| {
+                        (
+                            (normalize_glossary_source(&entry.source), entry.kind),
+                            index,
+                        )
+                    })
+                    .collect::<HashMap<_, _>>();
+                for aggregate in aggregates {
+                    let key = (normalize_glossary_source(&aggregate.source), aggregate.kind);
+                    if let Some(&index) = existing.get(&key) {
+                        matched_entry_count = matched_entry_count.saturating_add(1);
+                        let entry = &mut glossary.entries[index];
+                        if !matches!(
+                            entry.source_origin,
+                            GlossaryValueOrigin::User | GlossaryValueOrigin::Imported
+                        ) {
+                            entry.source = aggregate.source;
+                        }
+                        entry.confidence = Some(aggregate.confidence);
+                        entry.occurrence_count = aggregate.occurrence_count;
+                        entry.examples = aggregate.examples;
+                        entry.present_in_last_scan = true;
+                    } else {
+                        added_entry_count = added_entry_count.saturating_add(1);
+                        glossary.entries.push(GlossaryEntry {
+                            id: GlossaryEntryId::new(),
+                            source: aggregate.source,
+                            translation: None,
+                            kind: aggregate.kind,
+                            enabled: true,
+                            confidence: Some(aggregate.confidence),
+                            occurrence_count: aggregate.occurrence_count,
+                            examples: aggregate.examples,
+                            source_origin: GlossaryValueOrigin::Detected,
+                            translation_origin: None,
+                            present_in_last_scan: true,
+                            character: None,
+                            forbidden_variants: Vec::new(),
+                        });
+                    }
+                }
+                Ok(())
+            })
+            .await?;
+
+        let summary = if distinct_term_count == 0 {
+            GlossaryScanSummary::NoTermsFound {
+                source_text_count: input.source_text_count,
             }
-            Ok(())
-        })
-        .await
+        } else {
+            GlossaryScanSummary::Updated {
+                source_text_count: input.source_text_count,
+                candidate_occurrence_count,
+                distinct_term_count,
+                added_entry_count,
+                matched_entry_count,
+            }
+        };
+        Ok(GlossaryScanReport { glossary, summary })
     }
 
     pub(crate) async fn apply_term_translations(
@@ -470,12 +651,15 @@ fn hash_string(hasher: &mut blake3::Hasher, value: &str) {
 #[cfg(test)]
 mod tests {
     use koharu_scene::{
-        At, Authored, EntityId, GLOSSARY_EXAMPLE_MAX_CHARS, GLOSSARY_TEXT_MAX_CHARS, LanguageTag,
-        Origin, PageDraft, RemovePolicy, Session, SourceText, TextLayout, TextLayoutKind,
-        Translation, Visibility,
+        At, Authored, EntityId, GLOSSARY_EXAMPLE_MAX_CHARS, GLOSSARY_TEXT_MAX_CHARS, GlossaryEntryId,
+        LanguageTag, Origin, PageDraft, RemovePolicy, Session, SourceText, Speaker, TextLayout,
+        TextLayoutKind, Translation, Visibility,
     };
 
-    use super::{OcrSourceRecord, ocr_fingerprint, ocr_source_fingerprint};
+    use super::{
+        GlossaryScanInput, GlossaryScanSummary, OcrSourceRecord, ocr_fingerprint,
+        ocr_source_fingerprint,
+    };
     use crate::commands::{
         glossary::{
             GlossaryEntryDraft, GlossaryEntryPatch, GlossaryView, ScanCandidate,
@@ -681,6 +865,8 @@ mod tests {
             translation: translation.map(str::to_owned),
             kind: GlossaryKind::Person,
             enabled: true,
+            character: None,
+            forbidden_variants: Vec::new(),
         }
     }
 
@@ -743,6 +929,8 @@ mod tests {
                     translation: None,
                     kind: GlossaryKind::Term,
                     enabled: false,
+                    character: None,
+                    forbidden_variants: Vec::new(),
                 },
             )
             .await
@@ -793,6 +981,8 @@ mod tests {
                     translation: Some(" Alice ".to_owned()),
                     kind: GlossaryKind::Person,
                     enabled: true,
+                    character: None,
+                    forbidden_variants: Vec::new(),
                 },
             )
             .await
@@ -808,6 +998,8 @@ mod tests {
                     translation: Some(" \u{2003} ".to_owned()),
                     kind: GlossaryKind::Person,
                     enabled: true,
+                    character: None,
+                    forbidden_variants: Vec::new(),
                 },
             )
             .await
@@ -835,6 +1027,8 @@ mod tests {
             source_origin,
             translation_origin: translation.map(|_| source_origin),
             present_in_last_scan: true,
+            character: None,
+            forbidden_variants: Vec::new(),
         }
     }
 
@@ -847,12 +1041,21 @@ mod tests {
         }
     }
 
+    fn scan_input(candidates: Vec<ScanCandidate>) -> GlossaryScanInput {
+        GlossaryScanInput {
+            source_text_count: 1,
+            source_language: Some(LanguageTag::new("ja").unwrap()),
+            target_language: LanguageTag::new("en").unwrap(),
+            candidates,
+        }
+    }
+
     async fn assert_scan_rejected(candidates: Vec<ScanCandidate>, expected_error: &str) {
         let mut project = Project::new_test(Session::memory().await.unwrap(), "test".to_owned());
         let revision = project.revision();
 
         let error = project
-            .apply_glossary_scan(revision, None, None, candidates)
+            .apply_glossary_scan(revision, scan_input(candidates))
             .await
             .unwrap_err();
 
@@ -862,6 +1065,73 @@ mod tests {
         );
         assert_eq!(project.revision(), revision);
         assert!(project.undo.is_empty());
+    }
+
+    #[tokio::test]
+    async fn scan_without_ocr_text_reports_without_mutating_project() {
+        let mut project = Project::new_test(Session::memory().await.unwrap(), "test".to_owned());
+        let revision = project.revision();
+        let report = project
+            .apply_glossary_scan(
+                revision,
+                GlossaryScanInput {
+                    source_text_count: 0,
+                    source_language: None,
+                    target_language: LanguageTag::new("en").unwrap(),
+                    candidates: Vec::new(),
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(report.summary, GlossaryScanSummary::NoSourceText);
+        assert_eq!(report.glossary.revision, revision);
+        assert_eq!(project.revision(), revision);
+        assert!(project.undo.is_empty());
+    }
+
+    #[tokio::test]
+    async fn scan_with_text_but_no_candidates_completes_and_records_fingerprint() {
+        let mut session = Session::memory().await.unwrap();
+        let setup = session
+            .snapshot()
+            .patch(|edit| {
+                let page = edit.add_page(PageDraft::new("p1", 100.0, 100.0), At::End)?;
+                let text = edit.add_text_content(page, At::End)?;
+                edit.set(
+                    text,
+                    &SourceText {
+                        text: Authored::user("the".to_owned()),
+                        language: Some(LanguageTag::new("en")?),
+                    },
+                )?;
+                Ok(())
+            })
+            .unwrap();
+        let snapshot = session.commit(setup).await.unwrap().snapshot;
+        let input = crate::commands::glossary::scan::collect_project_scan_input(
+            &snapshot,
+            LanguageTag::new("ja").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(input.source_text_count, 1);
+        assert!(input.candidates.is_empty());
+        let mut project = Project::new_test(session, "test".to_owned());
+        let revision = project.revision();
+
+        let report = project.apply_glossary_scan(revision, input).await.unwrap();
+
+        assert_eq!(
+            report.summary,
+            GlossaryScanSummary::NoTermsFound {
+                source_text_count: 1
+            }
+        );
+        assert_eq!(report.glossary.revision, Revision::new(revision.get() + 1));
+        assert_eq!(
+            report.glossary.saved_source_fingerprint.as_deref(),
+            Some(report.glossary.current_source_fingerprint.as_str())
+        );
     }
 
     #[tokio::test]
@@ -967,12 +1237,10 @@ mod tests {
         let mut project = Project::new_test(session, "test".to_owned());
         let expected = project.revision();
 
-        let view = project
+        let report = project
             .apply_glossary_scan(
                 expected,
-                Some(LanguageTag::new("ja").unwrap()),
-                Some(LanguageTag::new("en").unwrap()),
-                vec![
+                scan_input(vec![
                     ScanCandidate {
                         source: "alice".to_owned(),
                         kind: GlossaryKind::Person,
@@ -1003,10 +1271,21 @@ mod tests {
                         confidence: 0.75,
                         example: Some("ボブさん".to_owned()),
                     },
-                ],
+                ]),
             )
             .await
             .unwrap();
+        assert_eq!(
+            report.summary,
+            GlossaryScanSummary::Updated {
+                source_text_count: 1,
+                candidate_occurrence_count: 5,
+                distinct_term_count: 3,
+                added_entry_count: 1,
+                matched_entry_count: 2,
+            }
+        );
+        let view = report.glossary;
 
         assert_view_revision(&view, Revision::new(expected.get() + 1));
         assert!(view.enabled);
@@ -1197,5 +1476,367 @@ mod tests {
             imported_view.translation_origin,
             imported.translation_origin
         );
+    }
+
+    #[tokio::test]
+    async fn deleting_glossary_entry_clears_text_layer_and_content_speakers() {
+        let mut project = Project::new_test(Session::memory().await.unwrap(), "test".to_owned());
+
+        let added = project
+            .add_glossary_entry(
+                project.revision(),
+                GlossaryEntryDraft {
+                    source: "アリス".to_owned(),
+                    translation: Some("Alice".to_owned()),
+                    kind: GlossaryKind::Person,
+                    enabled: true,
+                    character: None,
+                    forbidden_variants: Vec::new(),
+                },
+            )
+            .await
+            .unwrap();
+        let entry_id = added.entries[0].id;
+
+        let mut layer_id = None;
+        let mut content_id = None;
+        let setup = project
+            .snapshot()
+            .patch(|edit| {
+                let page = edit.add_page(PageDraft::new("p1", 800.0, 1200.0), At::End)?;
+                let content = edit.add_text_content(page, At::End)?;
+                edit.set(
+                    content,
+                    &SourceText {
+                        text: Authored::user("不思議の国へようこそ".to_owned()),
+                        language: Some(LanguageTag::new("ja")?),
+                    },
+                )?;
+                edit.set_speaker(content, Some(entry_id), Origin::User)?;
+
+                let layer = edit.add_text_layer(
+                    page,
+                    At::End,
+                    content,
+                    &TextLayout {
+                        origin: Origin::User,
+                        kind: TextLayoutKind::Paragraph,
+                        angle_degrees: None,
+                    },
+                )?;
+                edit.set_speaker(layer, Some(entry_id), Origin::User)?;
+
+                layer_id = Some(layer);
+                content_id = Some(content);
+                Ok(())
+            })
+            .unwrap();
+        project.session.commit(setup).await.unwrap();
+        let layer = layer_id.unwrap();
+        let content = content_id.unwrap();
+
+        {
+            let snap = project.snapshot();
+            assert_eq!(
+                snap.component::<Speaker>(layer).unwrap().and_then(|s| s.speaker),
+                Some(entry_id)
+            );
+            assert_eq!(
+                snap.component::<Speaker>(content).unwrap().and_then(|s| s.speaker),
+                Some(entry_id)
+            );
+        }
+
+        let deleted = project
+            .delete_glossary_entries(project.revision(), vec![entry_id])
+            .await
+            .unwrap();
+        assert!(deleted.entries.is_empty());
+
+        {
+            let snap = project.snapshot();
+            let layer_speaker = snap.component::<Speaker>(layer).unwrap().and_then(|s| s.speaker);
+            let content_speaker = snap.component::<Speaker>(content).unwrap().and_then(|s| s.speaker);
+
+            assert_eq!(layer_speaker, None, "TextLayer speaker must be cleared to None");
+            assert_eq!(content_speaker, None, "TextContent speaker must be cleared to None");
+
+            let effective_speaker = layer_speaker.or(content_speaker);
+            assert_eq!(effective_speaker, None, "Effective speaker fallback must yield None");
+        }
+    }
+
+    #[tokio::test]
+    async fn adversarial_stress_test_delete_glossary_entries_all_carrier_combinations_and_error_cases() {
+        let mut project = Project::new_test(Session::memory().await.unwrap(), "stress-test".to_owned());
+
+        // 1. Add 3 glossary entries: Alice, Bob, Charlie
+        let g1 = project
+            .add_glossary_entry(
+                project.revision(),
+                GlossaryEntryDraft {
+                    source: "アリス".to_owned(),
+                    translation: Some("Alice".to_owned()),
+                    kind: GlossaryKind::Person,
+                    enabled: true,
+                    character: None,
+                    forbidden_variants: Vec::new(),
+                },
+            )
+            .await
+            .unwrap();
+        let alice_id = g1.entries[0].id;
+
+        let g2 = project
+            .add_glossary_entry(
+                project.revision(),
+                GlossaryEntryDraft {
+                    source: "ボブ".to_owned(),
+                    translation: Some("Bob".to_owned()),
+                    kind: GlossaryKind::Person,
+                    enabled: true,
+                    character: None,
+                    forbidden_variants: Vec::new(),
+                },
+            )
+            .await
+            .unwrap();
+        let bob_id = g2.entries.iter().find(|e| e.source == "ボブ").unwrap().id;
+
+        let g3 = project
+            .add_glossary_entry(
+                project.revision(),
+                GlossaryEntryDraft {
+                    source: "チャーリー".to_owned(),
+                    translation: Some("Charlie".to_owned()),
+                    kind: GlossaryKind::Person,
+                    enabled: true,
+                    character: None,
+                    forbidden_variants: Vec::new(),
+                },
+            )
+            .await
+            .unwrap();
+        let charlie_id = g3.entries.iter().find(|e| e.source == "チャーリー").unwrap().id;
+
+        // 2. Setup carriers across Page 1 and Page 2:
+        let mut content_only_alice = None;
+        let mut content_only_bob = None;
+        let mut layer_only_alice = None;
+        let mut mixed_layer = None;
+        let mut mixed_content = None;
+        let mut layer_only_charlie = None;
+        let mut page2_layer_alice = None;
+        let mut page2_content_alice = None;
+        let mut page2_layer_bob = None;
+        let mut page2_content_bob = None;
+        let mut none_content = None;
+
+        let setup_patch = project
+            .snapshot()
+            .patch(|edit| {
+                // Page 1
+                let p1 = edit.add_page(PageDraft::new("p1", 800.0, 1200.0), At::End)?;
+
+                // Carrier 1: TextContent only with Alice (no TextLayer)
+                let c_alice = edit.add_text_content(p1, At::End)?;
+                edit.set_speaker(c_alice, Some(alice_id), Origin::User)?;
+                content_only_alice = Some(c_alice);
+
+                // Carrier 2: TextContent only with Bob (no TextLayer)
+                let c_bob = edit.add_text_content(p1, At::End)?;
+                edit.set_speaker(c_bob, Some(bob_id), Origin::User)?;
+                content_only_bob = Some(c_bob);
+
+                // Carrier 3: TextLayer only with Alice (its content has NO speaker)
+                let c_plain = edit.add_text_content(p1, At::End)?;
+                let l_alice = edit.add_text_layer(
+                    p1,
+                    At::End,
+                    c_plain,
+                    &TextLayout {
+                        origin: Origin::User,
+                        kind: TextLayoutKind::Paragraph,
+                        angle_degrees: None,
+                    },
+                )?;
+                edit.set_speaker(l_alice, Some(alice_id), Origin::User)?;
+                layer_only_alice = Some(l_alice);
+
+                // Carrier 4: Mixed: TextLayer has Bob, but TextContent has Alice!
+                let c_mixed = edit.add_text_content(p1, At::End)?;
+                edit.set_speaker(c_mixed, Some(alice_id), Origin::User)?;
+                let l_mixed = edit.add_text_layer(
+                    p1,
+                    At::End,
+                    c_mixed,
+                    &TextLayout {
+                        origin: Origin::User,
+                        kind: TextLayoutKind::Paragraph,
+                        angle_degrees: None,
+                    },
+                )?;
+                edit.set_speaker(l_mixed, Some(bob_id), Origin::User)?;
+                mixed_layer = Some(l_mixed);
+                mixed_content = Some(c_mixed);
+
+                // Carrier 5: TextLayer only with Charlie
+                let c_plain2 = edit.add_text_content(p1, At::End)?;
+                let l_charlie = edit.add_text_layer(
+                    p1,
+                    At::End,
+                    c_plain2,
+                    &TextLayout {
+                        origin: Origin::User,
+                        kind: TextLayoutKind::Paragraph,
+                        angle_degrees: None,
+                    },
+                )?;
+                edit.set_speaker(l_charlie, Some(charlie_id), Origin::User)?;
+                layer_only_charlie = Some(l_charlie);
+
+                // Carrier 6: Content with Speaker::new(None)
+                let c_none = edit.add_text_content(p1, At::End)?;
+                edit.set_speaker(c_none, None, Origin::User)?;
+                none_content = Some(c_none);
+
+                // Page 2
+                let p2 = edit.add_page(PageDraft::new("p2", 800.0, 1200.0), At::End)?;
+
+                // Carrier 7: Page 2 both Alice
+                let p2_c_alice = edit.add_text_content(p2, At::End)?;
+                edit.set_speaker(p2_c_alice, Some(alice_id), Origin::User)?;
+                let p2_l_alice = edit.add_text_layer(
+                    p2,
+                    At::End,
+                    p2_c_alice,
+                    &TextLayout {
+                        origin: Origin::User,
+                        kind: TextLayoutKind::Paragraph,
+                        angle_degrees: None,
+                    },
+                )?;
+                edit.set_speaker(p2_l_alice, Some(alice_id), Origin::User)?;
+                page2_layer_alice = Some(p2_l_alice);
+                page2_content_alice = Some(p2_c_alice);
+
+                // Carrier 8: Page 2 both Bob
+                let p2_c_bob = edit.add_text_content(p2, At::End)?;
+                edit.set_speaker(p2_c_bob, Some(bob_id), Origin::User)?;
+                let p2_l_bob = edit.add_text_layer(
+                    p2,
+                    At::End,
+                    p2_c_bob,
+                    &TextLayout {
+                        origin: Origin::User,
+                        kind: TextLayoutKind::Paragraph,
+                        angle_degrees: None,
+                    },
+                )?;
+                edit.set_speaker(p2_l_bob, Some(bob_id), Origin::User)?;
+                page2_layer_bob = Some(p2_l_bob);
+                page2_content_bob = Some(p2_c_bob);
+
+                Ok(())
+            })
+            .unwrap();
+        project.session.commit(setup_patch).await.unwrap();
+
+        let c_alice = content_only_alice.unwrap();
+        let c_bob = content_only_bob.unwrap();
+        let l_alice = layer_only_alice.unwrap();
+        let l_mixed = mixed_layer.unwrap();
+        let c_mixed = mixed_content.unwrap();
+        let l_charlie = layer_only_charlie.unwrap();
+        let p2_l_alice = page2_layer_alice.unwrap();
+        let p2_c_alice = page2_content_alice.unwrap();
+        let p2_l_bob = page2_layer_bob.unwrap();
+        let p2_c_bob = page2_content_bob.unwrap();
+        let c_none = none_content.unwrap();
+
+        // Verify initial state
+        {
+            let snap = project.snapshot();
+            assert_eq!(snap.component::<Speaker>(c_alice).unwrap().and_then(|s| s.speaker), Some(alice_id));
+            assert_eq!(snap.component::<Speaker>(c_bob).unwrap().and_then(|s| s.speaker), Some(bob_id));
+            assert_eq!(snap.component::<Speaker>(l_alice).unwrap().and_then(|s| s.speaker), Some(alice_id));
+            assert_eq!(snap.component::<Speaker>(l_mixed).unwrap().and_then(|s| s.speaker), Some(bob_id));
+            assert_eq!(snap.component::<Speaker>(c_mixed).unwrap().and_then(|s| s.speaker), Some(alice_id));
+            assert_eq!(snap.component::<Speaker>(l_charlie).unwrap().and_then(|s| s.speaker), Some(charlie_id));
+            assert_eq!(snap.component::<Speaker>(p2_l_alice).unwrap().and_then(|s| s.speaker), Some(alice_id));
+            assert_eq!(snap.component::<Speaker>(p2_c_alice).unwrap().and_then(|s| s.speaker), Some(alice_id));
+            assert_eq!(snap.component::<Speaker>(p2_l_bob).unwrap().and_then(|s| s.speaker), Some(bob_id));
+            assert_eq!(snap.component::<Speaker>(p2_c_bob).unwrap().and_then(|s| s.speaker), Some(bob_id));
+            assert_eq!(snap.component::<Speaker>(c_none).unwrap().and_then(|s| s.speaker), None);
+        }
+
+        // 3. Step A: Delete ONLY Alice
+        project
+            .delete_glossary_entries(project.revision(), vec![alice_id])
+            .await
+            .unwrap();
+
+        {
+            let snap = project.snapshot();
+            // Content-only Alice cleared to None
+            assert_eq!(snap.component::<Speaker>(c_alice).unwrap().and_then(|s| s.speaker), None);
+            // Content-only Bob preserved
+            assert_eq!(snap.component::<Speaker>(c_bob).unwrap().and_then(|s| s.speaker), Some(bob_id));
+            // Layer-only Alice cleared to None
+            assert_eq!(snap.component::<Speaker>(l_alice).unwrap().and_then(|s| s.speaker), None);
+            // Mixed carrier: Layer (Bob) preserved, Content (Alice) cleared to None!
+            assert_eq!(snap.component::<Speaker>(l_mixed).unwrap().and_then(|s| s.speaker), Some(bob_id));
+            assert_eq!(snap.component::<Speaker>(c_mixed).unwrap().and_then(|s| s.speaker), None);
+            // Layer Charlie preserved
+            assert_eq!(snap.component::<Speaker>(l_charlie).unwrap().and_then(|s| s.speaker), Some(charlie_id));
+            // Page 2 Alice carriers both cleared
+            assert_eq!(snap.component::<Speaker>(p2_l_alice).unwrap().and_then(|s| s.speaker), None);
+            assert_eq!(snap.component::<Speaker>(p2_c_alice).unwrap().and_then(|s| s.speaker), None);
+            // Page 2 Bob carriers both preserved
+            assert_eq!(snap.component::<Speaker>(p2_l_bob).unwrap().and_then(|s| s.speaker), Some(bob_id));
+            assert_eq!(snap.component::<Speaker>(p2_c_bob).unwrap().and_then(|s| s.speaker), Some(bob_id));
+
+            // CRITICAL EMPIRICAL SCAN: Ensure NO entity across entire scene holds alice_id
+            for entity in snap.entities_with::<Speaker>().unwrap() {
+                let sp = snap.component::<Speaker>(entity.id()).unwrap().and_then(|s| s.speaker);
+                assert_ne!(sp, Some(alice_id), "Entity {:?} has dangling alice_id reference!", entity.id());
+            }
+        }
+
+        // 4. Step B: Batch Delete [Bob, Charlie]
+        project
+            .delete_glossary_entries(project.revision(), vec![bob_id, charlie_id])
+            .await
+            .unwrap();
+
+        {
+            let snap = project.snapshot();
+            // CRITICAL EMPIRICAL SCAN: Verify ALL remaining speaker references are cleared to None
+            for entity in snap.entities_with::<Speaker>().unwrap() {
+                let sp = snap.component::<Speaker>(entity.id()).unwrap().and_then(|s| s.speaker);
+                assert_eq!(sp, None, "Entity {:?} has dangling speaker reference {:?}!", entity.id(), sp);
+            }
+        }
+
+        // 5. Negative Stress Cases:
+        // Case 5a: Non-existent entry ID
+        let missing_entry = GlossaryEntryId::new();
+        let err_missing = project
+            .delete_glossary_entries(project.revision(), vec![missing_entry])
+            .await;
+        assert!(err_missing.is_err(), "Deleting missing glossary entry must fail");
+
+        // Case 5b: Empty IDs list
+        let err_empty = project
+            .delete_glossary_entries(project.revision(), vec![])
+            .await;
+        assert!(err_empty.is_err(), "Deleting empty glossary IDs must fail");
+
+        // Case 5c: Stale revision
+        let stale_rev = Revision::new(999);
+        let err_stale = project
+            .delete_glossary_entries(stale_rev, vec![alice_id])
+            .await;
+        assert!(err_stale.is_err(), "Deleting with stale revision must fail");
     }
 }
