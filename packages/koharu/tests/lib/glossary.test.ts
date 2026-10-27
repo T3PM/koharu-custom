@@ -1,12 +1,17 @@
 import { describe, expect, it, vi } from 'vitest'
 
 import {
+  applyGlossaryReplacements,
   createGlossaryEntryUpdateQueue,
   eligibleGlossaryTranslationIds,
   filterGlossaryEntries,
   glossaryStatus,
+  loadGlossarySettings,
   normalizeGlossaryTranslation,
   parseGlossaryDocument,
+  restoreGlossaryTokens,
+  saveGlossarySettings,
+  substituteGlossaryTokens,
 } from '@/lib/glossary'
 import type { GlossaryEntryPatch, GlossaryEntryView, GlossaryView } from '@koharu/bridge/protocol'
 
@@ -24,6 +29,7 @@ const entries: GlossaryEntryView[] = [
     sourceOrigin: 'detected',
     translationOrigin: 'user',
     presentInLastScan: true,
+    character: null,
   },
   {
     revision: 1,
@@ -38,6 +44,7 @@ const entries: GlossaryEntryView[] = [
     sourceOrigin: 'detected',
     translationOrigin: null,
     presentInLastScan: false,
+    character: null,
   },
   {
     revision: 1,
@@ -52,6 +59,7 @@ const entries: GlossaryEntryView[] = [
     sourceOrigin: 'user',
     translationOrigin: null,
     presentInLastScan: true,
+    character: null,
   },
 ]
 
@@ -150,6 +158,7 @@ describe('glossary helpers', () => {
       translation: 'Haruka',
       kind: 'person',
       enabled: true,
+      character: null,
     })
     const firstView = view(2, '春香 first')
     first.resolve(firstView)
@@ -159,6 +168,7 @@ describe('glossary helpers', () => {
       translation: 'Moonlight Academy',
       kind: 'organization',
       enabled: true,
+      character: null,
     })
     expect(published).toEqual([])
 
@@ -202,6 +212,7 @@ describe('glossary helpers', () => {
       translation: 'Haruka',
       kind: 'person',
       enabled: true,
+      character: null,
     })
   })
 
@@ -225,5 +236,63 @@ describe('glossary helpers', () => {
     await expect(firstUpdate).rejects.toThrow('revision conflict')
     await expect(queuedUpdate).rejects.toThrow('revision conflict')
     expect(execute).toHaveBeenCalledTimes(1)
+  })
+
+  it('substitutes glossary terms with tokens ordered by length and restores them', () => {
+    const glossaryEntries = [
+      { source: '山田', translation: 'Yamada', enabled: true },
+      { source: '山田太郎', translation: 'Taro Yamada', enabled: true },
+      { source: '春香', translation: 'Haruka', enabled: true },
+      { source: '学園', translation: '', enabled: true },
+      { source: '無効', translation: 'Disabled', enabled: false },
+    ]
+
+    const input = '山田太郎と春香が歩いている。山田もいる。'
+    const { text, tokenMap } = substituteGlossaryTokens(input, glossaryEntries)
+
+    expect(text).toContain('__GLOSS_0__')
+    expect(text).toContain('__GLOSS_1__')
+    expect(text).toContain('__GLOSS_2__')
+    expect(tokenMap.get(0)).toBe('Taro Yamada')
+    expect(tokenMap.get(1)).toBe('Yamada')
+    expect(tokenMap.get(2)).toBe('Haruka')
+
+    // Compound '山田太郎' should be substituted before '山田'
+    expect(text).toBe('__GLOSS_0__と__GLOSS_2__が歩いている。__GLOSS_1__もいる。')
+
+    // Restoration
+    const translatedMock = '__GLOSS_0__ and __GLOSS_2__ are walking. __GLOSS_1__ is also there.'
+    const restored = restoreGlossaryTokens(translatedMock, tokenMap)
+    expect(restored).toBe('Taro Yamada and Haruka are walking. Yamada is also there.')
+  })
+
+  it('restores tokens case-insensitively with minor whitespace differences', () => {
+    const tokenMap = new Map<number, string>([
+      [0, 'Taro'],
+      [1, 'Tokyo'],
+    ])
+    const messy = '__gloss_0__ visited __GLOSS_1 __.'
+    expect(restoreGlossaryTokens(messy, tokenMap)).toBe('Taro visited Tokyo.')
+  })
+
+  it('applies direct post-translation replacements', () => {
+    const glossaryEntries = [
+      { source: '春香', translation: 'Haruka', enabled: true },
+      { source: 'sensei', translation: 'Teacher', enabled: true },
+    ]
+    expect(applyGlossaryReplacements('Hello 春香', glossaryEntries)).toBe('Hello Haruka')
+    expect(applyGlossaryReplacements('Hello SENSEI', glossaryEntries, { caseSensitive: false })).toBe('Hello Teacher')
+    expect(applyGlossaryReplacements('Hello SENSEI', glossaryEntries, { caseSensitive: true })).toBe('Hello SENSEI')
+  })
+
+  it('loads and saves glossary settings to storage', () => {
+    const initial = loadGlossarySettings()
+    expect(initial.enabled).toBe(true)
+    expect(initial.preSubstitute).toBe(true)
+
+    saveGlossarySettings({ ...initial, wholeWord: true, caseSensitive: true })
+    const updated = loadGlossarySettings()
+    expect(updated.wholeWord).toBe(true)
+    expect(updated.caseSensitive).toBe(true)
   })
 })

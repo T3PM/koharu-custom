@@ -142,10 +142,10 @@ describe('Tauri runtime', () => {
     expect(rename).toHaveBeenCalledWith('page', 'Chapter 1')
   })
 
-  it('passes the managed project name to open', async () => {
+  it('passes the managed project path to open', async () => {
     const open = vi.spyOn(commands, 'openProject').mockResolvedValue(null)
-    await expect(call(commands.openProject, 'Volume 1')).resolves.toBeNull()
-    expect(open).toHaveBeenCalledWith('Volume 1')
+    await expect(call(commands.openProject, '/workspace/Volume 1.khrproj')).resolves.toBeNull()
+    expect(open).toHaveBeenCalledWith('/workspace/Volume 1.khrproj')
   })
 
   it('applies independent channel updates directly to the store', async () => {

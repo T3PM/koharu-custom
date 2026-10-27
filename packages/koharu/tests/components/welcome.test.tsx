@@ -65,7 +65,7 @@ describe('StartView', () => {
           }
         : null,
     )
-    vi.spyOn(commands, 'listProjects').mockResolvedValue([{ name: 'Blue Archive' }])
+    vi.spyOn(commands, 'listProjects').mockResolvedValue([{ name: 'Blue Archive', path: '/workspaces/Blue Archive.khrproj' }])
     const open = vi.spyOn(commands, 'openProject').mockImplementation(async () => {
       opened = true
       return null
@@ -77,13 +77,13 @@ describe('StartView', () => {
     await waitFor(() => expect(project).toBeEnabled())
     fireEvent.click(project)
 
-    await waitFor(() => expect(open).toHaveBeenCalledWith('Blue Archive'))
+    await waitFor(() => expect(open).toHaveBeenCalledWith('/workspaces/Blue Archive.khrproj'))
     expect(await screen.findByText('Opened Blue Archive')).toBeInTheDocument()
   })
 
   it('confirms before deleting a managed project', async () => {
     vi.spyOn(commands, 'listProjects')
-      .mockResolvedValueOnce([{ name: 'Blue Archive' }])
+      .mockResolvedValueOnce([{ name: 'Blue Archive', path: '/workspaces/Blue Archive.khrproj' }])
       .mockResolvedValueOnce([])
     const remove = vi.spyOn(commands, 'deleteProject').mockResolvedValue(null)
     render(<StartView />)
@@ -98,6 +98,6 @@ describe('StartView', () => {
     expect(remove).not.toHaveBeenCalled()
 
     fireEvent.click(screen.getByRole('button', { name: 'Delete project' }))
-    await waitFor(() => expect(remove).toHaveBeenCalledWith('Blue Archive'))
+    await waitFor(() => expect(remove).toHaveBeenCalledWith('/workspaces/Blue Archive.khrproj'))
   })
 })

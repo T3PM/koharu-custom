@@ -61,7 +61,7 @@ vi.mock('@tauri-apps/plugin-opener', () => ({ openUrl: nativeOpenUrl }))
 
 const emptyCredential = () => ({ configured: false, value: null, clear: false })
 
-const textLayer: Layer = {
+const textLayer: Extract<Layer, { type: 'text' }> = {
   type: 'text',
   angle_degrees: 0,
   id: 'element',
@@ -96,6 +96,8 @@ const textLayer: Layer = {
   },
   layout: 'paragraph',
   automatic_region: null,
+  speaker: null,
+  balloon_shape: null,
 }
 
 const secondLayer: Layer = {
@@ -1714,6 +1716,7 @@ describe('greenfield editor', () => {
         providers,
         typesetting,
       }))
+    const invalidate = vi.spyOn(queryClient, 'invalidateQueries')
     render(
       <ThemeProvider attribute='class'>
         <SettingsPage />
@@ -1736,6 +1739,20 @@ describe('greenfield editor', () => {
         font_families: ['Arial'],
       }),
     )
+
+    save.mockClear()
+    invalidate.mockClear()
+    const fontWeight = screen
+      .getByText('Font Weight')
+      .parentElement?.querySelector('select') as HTMLSelectElement
+    await user.selectOptions(fontWeight, '600')
+    await waitFor(() =>
+      expect(save).toHaveBeenLastCalledWith(preferences.pipeline, preferences.providers, {
+        font_families: ['Arial'],
+        font_weight: 600,
+      }),
+    )
+    await waitFor(() => expect(invalidate).toHaveBeenCalledWith({ queryKey: pageKey }))
   })
 
   it('shows model resources in the left sidebar footer', () => {

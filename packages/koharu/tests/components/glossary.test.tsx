@@ -40,6 +40,7 @@ const entries: GlossaryEntryView[] = [
     sourceOrigin: 'detected',
     translationOrigin: 'user',
     presentInLastScan: true,
+    character: null,
   },
   {
     revision: 7,
@@ -54,6 +55,7 @@ const entries: GlossaryEntryView[] = [
     sourceOrigin: 'detected',
     translationOrigin: null,
     presentInLastScan: false,
+    character: null,
   },
   {
     revision: 7,
@@ -68,6 +70,7 @@ const entries: GlossaryEntryView[] = [
     sourceOrigin: 'user',
     translationOrigin: null,
     presentInLastScan: true,
+    character: null,
   },
 ]
 
@@ -244,6 +247,7 @@ describe('project glossary panel', () => {
         translation: 'Haruka',
         kind: 'person',
         enabled: true,
+        character: null,
       }),
     )
     await waitFor(() =>
@@ -260,12 +264,20 @@ describe('project glossary panel', () => {
   it('offers a first scan and changes to rescan when the glossary is stale', async () => {
     const user = userEvent.setup()
     install(glossary({ savedSourceFingerprint: null, entries: [] }))
-    const scan = vi.spyOn(commands, 'scanGlossary').mockResolvedValue('scan-job' as any)
+    const scannedGlossary = glossary({ savedSourceFingerprint: null, entries: [] })
+    const scan = vi.spyOn(commands, 'scanGlossary').mockResolvedValue({
+      glossary: scannedGlossary,
+      summary: { status: 'no_source_text' },
+    } as any)
     const view = render(<GlossaryPanel />)
 
     expect(screen.getByText('Not scanned')).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Scan glossary' }))
     await waitFor(() => expect(scan).toHaveBeenCalledOnce())
+    expect(await screen.findByRole('status')).toHaveTextContent(
+      'No OCR text is available. Run OCR before scanning the glossary.',
+    )
+    expect(queryClient.getQueryData(glossaryKey(project.name))).toEqual(scannedGlossary)
 
     queryClient.setQueryData(glossaryKey(project.name), glossary({ stale: true }))
     view.rerender(
@@ -277,6 +289,38 @@ describe('project glossary panel', () => {
     )
     expect(await screen.findByText('Needs rescan')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Rescan glossary' })).toBeInTheDocument()
+  })
+
+  it.each([
+    [
+      'no_terms_found',
+      { status: 'no_terms_found', sourceTextCount: 2 },
+      'Scanned 2 OCR text records. No glossary terms were detected.',
+    ],
+    [
+      'updated',
+      {
+        status: 'updated',
+        sourceTextCount: 2,
+        candidateOccurrenceCount: 5,
+        distinctTermCount: 3,
+        addedEntryCount: 2,
+        matchedEntryCount: 1,
+      },
+      'Scanned 2 OCR text records: 3 terms from 5 matches. Added 2; matched 1 existing.',
+    ],
+  ] as const)('shows the %s scan result', async (_, summary, message) => {
+    const user = userEvent.setup()
+    install(glossary({ savedSourceFingerprint: null, entries: [] }))
+    const scan = vi.spyOn(commands, 'scanGlossary').mockResolvedValue({
+      glossary: glossary({ entries: [] }),
+      summary,
+    } as any)
+    render(<GlossaryPanel />)
+
+    await user.click(screen.getByRole('button', { name: 'Scan glossary' }))
+    await waitFor(() => expect(scan).toHaveBeenCalledOnce())
+    expect(await screen.findByText(message)).toBeInTheDocument()
   })
 
   it.each([
@@ -337,6 +381,7 @@ describe('project glossary panel', () => {
         translation: 'Haruka',
         kind: 'person',
         enabled: true,
+        character: null,
       }),
     )
     fireEvent.change(source, { target: { value: '春香 latest' } })
@@ -350,6 +395,7 @@ describe('project glossary panel', () => {
         translation: 'Haruka',
         kind: 'person',
         enabled: true,
+        character: null,
       }),
     )
     await act(async () =>
@@ -399,6 +445,7 @@ describe('project glossary panel', () => {
         translation: 'Moonlight Academy',
         kind: 'organization',
         enabled: true,
+        character: null,
       }),
     )
     const secondView = glossary({
@@ -464,6 +511,7 @@ describe('project glossary panel', () => {
         translation: 'Haruka',
         kind: 'person',
         enabled: true,
+        character: null,
       }),
     )
 
@@ -479,6 +527,7 @@ describe('project glossary panel', () => {
         translation: 'Blurred translation',
         kind: 'person',
         enabled: true,
+        character: null,
       }),
     )
   })
@@ -507,6 +556,7 @@ describe('project glossary panel', () => {
         translation: null,
         kind: 'person',
         enabled: true,
+        character: null,
       }),
     )
   })
@@ -531,6 +581,7 @@ describe('project glossary panel', () => {
         translation: 'Haruka',
         kind: 'person',
         enabled: false,
+        character: null,
       }),
     )
   })
@@ -578,6 +629,7 @@ describe('project glossary panel', () => {
         translation: 'New term',
         kind: 'term',
         enabled: true,
+        character: null,
       }),
     )
 
@@ -778,7 +830,9 @@ describe('project glossary panel', () => {
   it('exports through the generated shared download command', async () => {
     const user = userEvent.setup()
     install()
-    const exportGlossary = vi.spyOn(commands, 'exportGlossary').mockResolvedValue('path/to/glossary.json')
+    const exportGlossary = vi
+      .spyOn(commands, 'exportGlossary')
+      .mockResolvedValue('path/to/glossary.json')
     render(<GlossaryPanel />)
 
     await openActions()
@@ -807,5 +861,36 @@ describe('project glossary panel', () => {
     )
     await waitFor(() => expect(getGlossary).toHaveBeenCalled())
     expect(update).toHaveBeenCalledTimes(1)
+  })
+
+  it('locates glossary entry on canvas by switching page and selecting layer', async () => {
+    const user = userEvent.setup()
+    install()
+    const locate = vi.spyOn(commands, 'locateGlossaryEntry').mockResolvedValue([
+      {
+        pageId: 'page-1',
+        entityId: 'bubble-layer-1',
+        pageIndex: 0,
+        snippet: '春香ちゃんおはよう',
+      },
+    ])
+    render(<GlossaryPanel />)
+    const locateBtn = screen.getAllByRole('button', { name: 'Show on image' })[0]
+    await user.click(locateBtn)
+    expect(locate).toHaveBeenCalledWith('haruka')
+    expect(useKoharuStore.getState().selectedPages).toEqual(['page-1'])
+    expect(useKoharuStore.getState().selectedLayers).toEqual(['bubble-layer-1'])
+  })
+
+  it('classifies glossary entries via AI classification command', async () => {
+    const user = userEvent.setup()
+    install()
+    const classify = vi
+      .spyOn(commands, 'classifyGlossaryEntries')
+      .mockResolvedValue(glossary({ revision: 8 }))
+    render(<GlossaryPanel />)
+    await openActions()
+    await user.click(screen.getByRole('menuitem', { name: 'Classify names (AI)' }))
+    expect(classify).toHaveBeenCalledWith(7, null)
   })
 })

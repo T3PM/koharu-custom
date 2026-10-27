@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { resizeFrame, rotateFrame } from '@/lib/geometry'
+import { resizeFrame, rotateFrame, selectableLayer, selectableTextLayer } from '@/lib/geometry'
 import type { Frame } from '@koharu/bridge/protocol'
 
 const frame: Frame = { x: 10, y: 20, width: 100, height: 50, angle_degrees: 0 }
@@ -33,5 +33,21 @@ describe('selection control geometry', () => {
       ...frame,
       angle_degrees: 90,
     })
+  })
+})
+
+describe('layer selection helpers', () => {
+  it('identifies selectable layers and distinguishes text layers for bulk selection', () => {
+    const textLayer = { id: 'text-1', type: 'text' } as any
+    const imageLayer = { id: 'img-1', type: 'image' } as any
+    const artworkLayer = { id: 'art-1', type: 'artwork' } as any
+
+    expect(selectableLayer(textLayer)).toBe(true)
+    expect(selectableLayer(imageLayer)).toBe(true)
+    expect(selectableLayer(artworkLayer)).toBe(false)
+
+    expect(selectableTextLayer(textLayer)).toBe(true)
+    expect(selectableTextLayer(imageLayer)).toBe(false)
+    expect(selectableTextLayer(artworkLayer)).toBe(false)
   })
 })
